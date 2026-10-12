@@ -102,6 +102,34 @@ docker compose up -d --build
 
 Your `.env` and `data/` folder are never touched by an update.
 
+### Prebuilt image
+
+Every release is also published as an image for amd64 and arm64, so you can
+skip the build. Put this `compose.yaml` next to your `.env` (copied from
+[.env.example](.env.example)):
+
+```yaml
+services:
+  plex-monitor:
+    image: ghcr.io/corruptmods/plexmonitor:latest
+    container_name: plex-monitor
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8322:8322"   # Tautulli webhook; see SETUP.md
+```
+
+Then `docker compose up -d`. To update: `docker compose pull && docker compose
+up -d`. Use a version tag (for example `:1.0.0`) instead of `:latest` to stay
+on one release.
+
 ## Commands
 
 | Command | Who | What it does |

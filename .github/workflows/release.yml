@@ -1,0 +1,140 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+#
+# Publishes the PlexMonitor image to GitHub's container registry, for amd64
+# and arm64, and creates the GitHub release:
+#
+#   ghcr.io/<owner>/plexmonitor:1.2.3, :1.2, :latest   for a tag v1.2.3
+#   ghcr.io/<owner>/plexmonitor:sha-abc1234            for every build
+#
+# Release with:  git tag v1.2.3 && git push origin v1.2.3
+# The tag must match BUILD in cogs/dashboard.py (BUILD = "v1.2.3"), and
+# CHANGELOG.md needs a "## 1.2.3" section: it becomes the release notes.
+# A version with a "-" (v1.3.0-beta.1) is a pre-release and does not move
+# :latest.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build and publish the image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write # the GitHub release
+      packages: write # the image
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${GITHUB_REF_NAME} is not v followed by a version like 1.2.3"
+            exit 1
+          fi
+          BUILD=$(sed -n 's/^BUILD = "\(.*\)"$/\1/p' cogs/dashboard.py)
+          if [[ "${BUILD}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::cogs/dashboard.py says BUILD = \"${BUILD}\", but the tag is ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          # This version's section of CHANGELOG.md, without its heading.
+          awk -v v="## ${VERSION}" '
+            $0 == v { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
+            echo "::error::CHANGELOG.md has no \"## ${VERSION}\" section"
+            exit 1
+          fi
+          PRERELEASE=false
+          [[ "${VERSION}" == *-* ]] && PRERELEASE=true
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "PRERELEASE=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "TIMESTAMP=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/plexmonitor" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (arm64)
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ steps.version.outputs.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.VERSION }},enable=${{ steps.version.outputs.PRERELEASE == 'false' }}
+            type=raw,value=latest,enable=${{ steps.version.outputs.PRERELEASE == 'false' }}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=PlexMonitor
+            org.opencontainers.image.description=A Discord bot for your Plex server: live dashboard, stream cards, Seerr requests and a private AI assistant.
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.created=${{ steps.version.outputs.TIMESTAMP }}
+
+      - name: Build and push (amd64, arm64)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          PRERELEASE: ${{ steps.version.outputs.PRERELEASE }}
+          IMAGE: ${{ steps.version.outputs.IMAGE }}
+        run: |
+          {
+            echo
+            echo "### Docker image"
+            echo
+            echo '```'
+            echo "${IMAGE}:${VERSION}"
+            echo '```'
+          } >> release-notes.md
+          FLAGS=""
+          [[ "${PRERELEASE}" == "true" ]] && FLAGS="--prerelease"
+          # A release cut again (the tag moved) keeps its page, refreshed.
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "PlexMonitor ${VERSION}" --notes-file release-notes.md ${FLAGS}
+          else
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "PlexMonitor ${VERSION}" --notes-file release-notes.md ${FLAGS}
+          fi

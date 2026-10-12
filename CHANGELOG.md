@@ -23,4 +23,4 @@ assistant what to watch next, without leaving Discord.
   missing episodes, and `/recap` for a spoiler-free "previously on" (with
   Seerr AI).
 
-See the [README](README.md) to get started.
+See the [README](https://github.com/corruptmods/plexmonitor#readme) to get started.
