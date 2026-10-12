@@ -1,0 +1,248 @@
+{
+    "dashboard": {
+        "name": "Your Plex Dashboard",
+        "icon_url": "",
+        "footer_icon_url": "",
+        "field_style": "boxed",
+        "section_gap": false,
+        "line_width": 40,
+        "online_text": "Plex is Online",
+        "offline_text": "Plex is Offline",
+        "use_builtin_icon": false,
+        "live_eta": true,
+        "refresh_seconds": 60,
+        "heartbeat_minutes": 10,
+        "stats_in_author": false,
+        "always_show_stats": true,
+        "stats_style": "fields",
+        "repost_hours": 0,
+        "user_line": true,
+        "user_indent": 1,
+        "section_divider": false,
+        "divider_style": "hairline",
+        "divider_width": 20,
+        "change_poll_seconds": 20,
+        "field_layout": "columns",
+        "section_titles": false,
+        "section_title_style": "subtext",
+        "label_emoji_position": "suffix",
+        "uptime_relative": false,
+        "section_title_upper": true,
+        "paused_text": "Paused",
+        "downloads_boxed": false,
+        "seek_detection": true,
+        "seek_threshold_seconds": 15,
+        "active_refresh_seconds": 0
+    },
+    "_panels_help": [
+        "total_space comes from SABnzbd and describes its download",
+        "volume -- usually a scratch disk, not your media storage. Off by default."
+    ],
+    "panels": {
+        "total_space": false,
+        "queue_speed": true,
+        "downloads": true,
+        "reliability": true,
+        "legend": true,
+        "bandwidth": true,
+        "response": false,
+        "last_downtime": false,
+        "all_time_uptime": false,
+        "bot_uptime": false,
+        "legend_bar_colours": false,
+        "direct_play": false,
+        "stream_downloads": false,
+        "transcode_count": false,
+        "wan_lan": false,
+        "episodes": true,
+        "live_row": true
+    },
+    "_emoji_help": [
+        "Unicode emoji work in every slot below.",
+        "Custom and ANIMATED emoji (<a:name:id>) are only safe in 'online' and",
+        "'offline', which the bot renders in the embed description -- Discord",
+        "guarantees custom emoji there. Field names may render them as raw text",
+        "depending on client, so keep unicode in the rest unless you test first.",
+        "Get an id by typing \\:emojiname: in Discord and sending it.",
+        "Set any value to \"\" to hide that emoji."
+    ],
+    "emoji": {
+        "online": "🟢",
+        "offline": "🔴",
+        "uptime": "🖥️",
+        "streams": "📡",
+        "free_space": "💾",
+        "queue_speed": "🚀",
+        "total_space": "🗄️",
+        "now_playing": "🎬",
+        "downloading": "📥",
+        "uptime_stats": "📊",
+        "playing": "▶️",
+        "paused": "⏸️",
+        "transcode": "🔄",
+        "direct": "⚡",
+        "idle": "💤",
+        "episodes": "🎥",
+        "tracks": "🎵",
+        "bandwidth": "📶",
+        "progress": "⏳",
+        "completed": "✅"
+    },
+    "progress_bar": {
+        "style": "parallelogram",
+        "inline_code": true,
+        "segments": 21,
+        "show_percent": true,
+        "styles": {
+            "emoji": {
+                "filled": "<:bar_full:000000000000000000>",
+                "empty": "<:bar_empty:000000000000000000>",
+                "cap_left": "<:bar_left:000000000000000000>",
+                "cap_right": "<:bar_right:000000000000000000>"
+            }
+        },
+        "min_filled": 1
+    },
+    "plex_sections": {
+        "show_all": false,
+        "sections": {
+            "Movies": {
+                "display_name": "Movies",
+                "emoji": "🎞️",
+                "show_episodes": false
+            },
+            "TV Shows": {
+                "display_name": "Shows",
+                "emoji": "📺",
+                "show_episodes": true
+            },
+            "Documentaries": {
+                "display_name": "Documentaries",
+                "emoji": "🎓",
+                "show_episodes": false
+            }
+        }
+    },
+    "presence": {
+        "sections": [
+            {
+                "section_title": "Movies",
+                "display_name": "Movies",
+                "emoji": "🎞️"
+            },
+            {
+                "section_title": "TV Shows",
+                "display_name": "Shows",
+                "emoji": "📺"
+            }
+        ],
+        "offline_text": "Server offline",
+        "stream_text": "{count} active stream{s}",
+        "idle_text": "Idle"
+    },
+    "cache": {
+        "library_update_interval": 900,
+        "uptime_update_interval": 300,
+        "down_confirmations": 2
+    },
+    "sabnzbd": {
+        "max_items": 4,
+        "max_name_length": 45,
+        "keywords": [
+            "AC3",
+            "DL",
+            "German",
+            "1080p",
+            "2160p",
+            "4K",
+            "English"
+        ]
+    },
+    "channel_dot": {
+        "enabled": true,
+        "online": "🟢",
+        "offline": "🔴"
+    },
+    "stream_cards": {
+        "enabled": true,
+        "max_cards": 5,
+        "bar_image": false,
+        "bar_quantum": 10,
+        "image_batch": 3,
+        "image_edit_gap_seconds": 120,
+        "image_refresh_seconds": 1200,
+        "width_strip": false,
+        "card_anchor": true,
+        "anchor_style": "strip",
+        "layout": "clean",
+        "center_bar": false,
+        "bar_gap": 0,
+        "detail_indent": 1,
+        "bar_gap_below": 0,
+        "bar_position": "bottom",
+        "percent_position": "line",
+        "channel_id": 0,
+        "idle_embed": true,
+        "idle_text": "Nothing playing right now",
+        "bar_autofit": true,
+        "bar_budget_px": 385,
+        "bandwidth_line": true,
+        "delivery_icon": true,
+        "show_hw_encode": false,
+        "headline_delivery_badge": false,
+        "wrap_titles": true,
+        "title_wrap": "wrap",
+        "artwork": "attach"
+    },
+    "webhook": {
+        "enabled": true,
+        "port": 8322,
+        "secret": "",
+        "min_gap_seconds": 10
+    },
+    "recent_downloads": {
+        "enabled": true,
+        "in_main_embed": true,
+        "title": "Completed Downloads",
+        "limit": 5,
+        "max_age_hours": 0,
+        "width_strip": false,
+        "style": "line",
+        "live_age": false,
+        "line_px": 410,
+        "show_size": false,
+        "require_import": true
+    },
+    "requests": {
+        "enabled": true,
+        "announce_channel_id": 0,
+        "poll_seconds": 120,
+        "max_age_hours": 48,
+        "discord_links": {},
+        "panel_channel_id": 0,
+        "watch_party_dms": false
+    },
+    "_requests_help": [
+        "announce_channel_id: channel for 'Now on Plex' posts (0 = off). ANNOUNCE_CHANNEL_ID in .env overrides it.",
+        "panel_channel_id: channel for the permanent request panel (Request / Ask AI buttons; 0 = off). REQUEST_PANEL_CHANNEL_ID in .env overrides it. Give it its own channel, not the status or stream cards channel.",
+        "watch_party_dms: only for a companion watch party bot signed in with this same bot token: DM each requester a Start watch party button (custom_id reqgo:<user>:<movie|tv>:<tmdb id>:x) when their title lands. Leave false otherwise. WATCH_PARTY_DMS in .env overrides it.",
+        "discord_links: {\"<discord user id>\": <seerr user id>} for anyone whose Seerr profile has no Discord ID. Bot admins (DISCORD_AUTHORIZED_USERS, or the owner) can also use /link and /unlink, and approve link requests people send from the Link card."
+    ],
+    "assistant": {
+        "enabled": true,
+        "engine": "auto",
+        "channel_id": 0,
+        "daily_limit": 25,
+        "history": 8,
+        "delete_mentions": true,
+        "dms": true
+    },
+    "_assistant_help": [
+        "Conversations are private: Ask AI in the request panel answers only the asker (with a Reply button), and an @mention in channel_id moves the chat to the person's DMs.",
+        "engine: 'seerr' = Seerr's own AI (asked as the person: their watch history, Seerr's model and daily limit); 'own' = the bot's AI_PROVIDER model; 'auto' = Seerr's AI for linked people it's on for, the bot's model otherwise.",
+        "/recap is Seerr's Catch Me Up: it uses Seerr's AI, so it is off when engine is 'own'.",
+        "channel_id: where @mentions are accepted (0 = any channel). DMs always work while dms is true.",
+        "delete_mentions: remove the @mention from the channel so the question isn't public (needs Manage Messages there).",
+        "daily_limit: questions per person per day on the bot's own model (0 = unlimited); Seerr's AI keeps its own limit. history: remembered exchanges per conversation. Provider and key live in .env."
+    ]
+}

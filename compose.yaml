@@ -1,0 +1,45 @@
+# PlexMonitor. Fill in .env (copy .env.example), then:
+#
+#   docker compose up -d --build
+#
+# The image is built from this folder. With Dockge, clone the repo into your
+# stacks directory and press Deploy.
+
+services:
+  plex-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: plex-monitor:local
+    # Always build from this folder, never try to pull the local tag, so a
+    # plain "up" (or Dockge's Deploy) picks up new code too.
+    pull_policy: build
+    container_name: plex-monitor
+    restart: unless-stopped
+    # Python is PID 1 and has no SIGTERM handler, so `docker stop` used to
+    # wait 10s and SIGKILL it -- no clean disconnect, no cog_unload, and
+    # half-written state files. SIGINT is handled: discord.py closes the
+    # bot and unloads every cog.
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+    env_file:
+      - .env
+    environment:
+      - RUNNING_IN_DOCKER=true
+      - TZ=${TZ:-Etc/UTC}
+    volumes:
+      # Holds config.json, user_mapping.json, the dashboard message id and
+      # server_state.json. Keeping this on a bind mount is what lets uptime
+      # survive a container rebuild.
+      - ./data:/app/data
+    ports:
+      # Realtime refresh: Tautulli's Webhook notification agent POSTs here
+      # on playback start/stop/pause/resume. Meant for your LAN only: to
+      # publish it on one address, use e.g. "192.168.1.10:8322:8322".
+      - "8322:8322"
+    logging:
+      driver: json-file
+      options:
+        # 250MB total: about a week of logs.
+        max-size: "50m"
+        max-file: "5"

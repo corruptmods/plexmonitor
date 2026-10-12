@@ -1,0 +1,22 @@
+# Pinned deliberately. The upstream project left these unpinned, which means
+# every rebuild silently pulls whatever was published that day. Bump these on
+# purpose, not by accident.
+#
+# uptime_kuma_api is gone: it only supports Uptime Kuma <= 1.23.x and cannot
+# talk to a 2.x server. Kuma is now read over its /metrics and badge endpoints
+# using aiohttp, so it needs no dedicated library.
+
+discord.py==2.7.1
+PlexAPI==4.18.3
+aiohttp==3.14.3
+python-dotenv==1.2.3
+
+# Optional: enables seeding the uptime counter from Uptime Kuma's transition
+# history. Kuma exposes timestamps only over socket.io -- its HTTP endpoints
+# give current status and ratios but no dates. Remove this line and the bot
+# still runs; it just starts counting uptime from first deploy.
+python-socketio[client]==5.17.0
+
+# Renders the progress-bar and accent-strip images that anchor every embed
+# at an identical pixel width. Without it the bot falls back to text bars.
+pillow==12.3.0

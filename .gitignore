@@ -1,0 +1,13 @@
+# Secrets live only on the server -- never in the repo.
+.env
+.env.*
+!.env.example
+
+# Live runtime state (bind-mounted on the server) -- the whole directory.
+# Seed copies live in defaults/, which IS tracked.
+data/
+
+# Python litter
+__pycache__/
+*.pyc
+logs/

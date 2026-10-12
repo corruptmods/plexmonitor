@@ -1,0 +1,21 @@
+# Secrets arrive at runtime through env_file -- they must never be baked into
+# an image layer, where `docker history` / `docker save` would expose them.
+.env
+.env.*
+!.env.example
+
+# Live state is a bind mount; copying it made the COPY layer change every
+# 30 seconds (health.json) and shipped message ids into the image.
+data/
+
+# Repo and dev litter.
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.bak
+*.tmp
+logs/
+
+# Screenshots for the README.
+docs/
