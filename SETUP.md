@@ -100,7 +100,7 @@ cleanly rather than erroring:
 
 | Feature | Settings |
 |---|---|
-| Downloads in progress | `SABNZBD_URL`, `SABNZBD_API_KEY` |
+| Downloads in progress | SABnzbd (`SABNZBD_URL`, `SABNZBD_API_KEY`) and/or qBittorrent (`QBITTORRENT_URL`, `QBITTORRENT_USERNAME`, `QBITTORRENT_PASSWORD`) |
 | Recently downloaded, with proper titles | `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY` |
 | Uptime figures | `UPTIMEROBOT_API_KEY` (wins if set), or Uptime Kuma 2.x (`UPTIME_*`, below) |
 | Requests, `/issue`, "Now on Plex" | `SEERR_URL`, `SEERR_API_KEY` (below) |
@@ -283,6 +283,34 @@ require a secret, set `webhook.secret` in `data/config.json` and use
 `http://<bot host>:8322/webhook/<secret>` instead. The worst a stranger can do
 with the URL is trigger refreshes, which are rate limited anyway.
 
+### Download clients
+
+PlexMonitor reads the download clients Seerr AI supports: **SABnzbd** and
+**qBittorrent**, either or both. Their queues show as one **Downloading**
+panel, busiest first, with the combined speed. A job that isn't moving says
+why: *paused*, *queued*, *checking*, *getting metadata*, or *stalled, no
+peers* for a torrent nobody is sharing.
+
+For qBittorrent, set `QBITTORRENT_URL` to its Web UI address. The bot signs in
+with `QBITTORRENT_USERNAME` and `QBITTORRENT_PASSWORD` and keeps the session,
+so it doesn't sign in on every refresh. Leave them blank only if qBittorrent
+lets this bot's address in without signing in (Options → Web UI → *Bypass
+authentication for clients in whitelisted IP subnets*). A torrent leaves the
+panel once it finishes downloading, whether it seeds or not. If qBittorrent
+also holds torrents that have nothing to do with Plex, set
+`QBITTORRENT_CATEGORIES` to the categories Radarr and Sonarr use (for example
+`radarr,tv-sonarr`).
+
+**Completed Downloads** lists what just finished. With Radarr or Sonarr set
+up, it lists only what they imported (a download that finished but failed to
+import isn't news). Without them, it uses SABnzbd's history, qBittorrent's
+finished torrents, and what the bot saw leave the queue at 100%.
+
+The `downloads` section of `data/config.json` (`max_items`, `max_name_length`,
+and `keywords`, which trims release tags like `1080p` off names) covers both
+clients. An older config's `sabnzbd` section is still read when there's no
+`downloads` one.
+
 ### Stream cards channel
 
 By default the stream cards sit under the dashboard. To give them their own
@@ -316,7 +344,7 @@ Two caveats worth knowing up front:
 
 All in `data/config.json`. Changes apply on the next refresh (≤ 1 min) — no
 rebuild, since `data/` is a bind mount. The exceptions, which need a restart
-(`docker compose restart`): the `sabnzbd` section, `webhook.port`, and the
+(`docker compose restart`): the `downloads` section, `webhook.port`, and the
 `stream_cards.channel_id` channel. A section that isn't a JSON object is
 ignored with a warning in the log, and its defaults are used.
 
@@ -374,7 +402,8 @@ your client. Custom emoji also **never** render inside a code block, so with
 
 `total_space` reports **SABnzbd's** download volume — usually a scratch disk
 rather than media storage — so it's off by default. The download panels only
-appear when SABnzbd (or, for finished downloads, Radarr or Sonarr) is set up.
+appear when SABnzbd or qBittorrent (or, for finished downloads, Radarr or
+Sonarr) is set up.
 
 ### Stream card percent
 

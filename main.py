@@ -46,6 +46,7 @@ LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INF
 # can include that URL.
 SECRET_SETTINGS = (
     "DISCORD_TOKEN", "TAUTULLI_API_KEY", "PLEX_TOKEN", "SABNZBD_API_KEY",
+    "QBITTORRENT_PASSWORD",
     "UPTIME_API_KEY", "UPTIME_PASSWORD", "UPTIMEROBOT_API_KEY",
     "RADARR_API_KEY", "SONARR_API_KEY", "SEERR_API_KEY", "AI_API_KEY",
 )
@@ -123,6 +124,8 @@ intents = discord.Intents.default()
 intents.message_content = False
 
 COGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cogs")
+# Cog files from older versions, and what replaced them.
+RETIRED_COGS = {"sabnzbd": "downloads"}
 DATA_DIR = data_dir()
 
 
@@ -163,6 +166,12 @@ class PlexMonitorBot(commands.Bot):
             if not filename.endswith(".py") or filename.startswith("__"):
                 continue
             name = filename[:-3]
+            if name in RETIRED_COGS:
+                # Left behind by an update that copied files over the old
+                # ones instead of replacing the folder.
+                bot_logger.info("Skipping cogs/%s -- replaced by cogs/%s.py; "
+                                "it can be deleted", filename, RETIRED_COGS[name])
+                continue
             try:
                 await self.load_extension(f"cogs.{name}")
                 bot_logger.info("Loaded cog: %s", name)

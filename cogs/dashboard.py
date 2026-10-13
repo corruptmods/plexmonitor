@@ -58,7 +58,7 @@ logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.0.0"
+BUILD = "v1.1.0"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -368,7 +368,8 @@ class CardPager(discord.ui.View):
 # a warning, instead of breaking every refresh that reads it.
 CONFIG_SECTIONS = (
     "dashboard", "panels", "emoji", "progress_bar", "plex_sections",
-    "presence", "cache", "sabnzbd", "channel_dot", "stream_cards",
+    "presence", "cache", "downloads", "sabnzbd", "channel_dot",
+    "stream_cards",
     "webhook", "recent_downloads",
 )
 
@@ -969,7 +970,7 @@ class Dashboard(commands.Cog):
         # this is a field of its own carrying a run of box-drawing dashes as
         # subtext -- muted and thin rather than a heavy line. Costs one of
         # the 25 field slots per divider, which is why it is opt-in.
-        # Event-driven refresh. A short poll of Tautulli and SABnzbd -- both
+        # Event-driven refresh. A short poll of Tautulli and the download clients -- both
         # on the LAN and effectively free -- watching for CHANGES rather
         # than for the clock. Progress and elapsed time are deliberately
         # excluded from the signature: they move every second, and reacting
@@ -1812,18 +1813,24 @@ class Dashboard(commands.Cog):
         self._kuma_cache_at = now
         return self._kuma_cache
 
-    def _sab_enabled(self) -> bool:
-        cog = self.bot.get_cog("SABnzbd")
-        return bool(cog is not None and getattr(cog, "enabled", False))
+    def _downloads_cog(self):
+        """The Downloads cog when a download client (SABnzbd, qBittorrent)
+        is set up, else None."""
+        cog = self.bot.get_cog("Downloads")
+        return cog if cog is not None and getattr(cog, "enabled", False) \
+            else None
+
+    def _downloads_enabled(self) -> bool:
+        return self._downloads_cog() is not None
 
     async def _fetch_downloads(self) -> Dict[str, Any]:
-        cog = self.bot.get_cog("SABnzbd")
+        cog = self._downloads_cog()
         if not cog:
             return {}
         try:
-            data = await cog.get_sabnzbd_info() or {}
+            data = await cog.get_info() or {}
         except Exception as exc:
-            logger.warning("SABnzbd fetch failed: %s", exc)
+            logger.warning("Download client fetch failed: %s", exc)
             return {}
         # Every queue read is also a chance to notice something finished.
         # Hooked here rather than in the refresh loop so it sees the change
@@ -2598,7 +2605,7 @@ class Dashboard(commands.Cog):
         return f"{headline}\n" + "\n".join(lines)
 
     def _download_line(self, download: Dict[str, Any]) -> str:
-        cog = self.bot.get_cog("SABnzbd")
+        cog = self._downloads_cog()
         name = download.get("name", "Unknown")
         if cog and hasattr(cog, "clean_name"):
             name = cog.clean_name(name)
@@ -2608,6 +2615,10 @@ class Dashboard(commands.Cog):
             percent = 0.0
 
         detail = []
+        # Not downloading right now (paused, queued, a torrent with no
+        # peers): said first, since it explains why nothing is moving.
+        if download.get("status"):
+            detail.append(str(download["status"]))
         if download.get("timeleft"):
             detail.append(f"{download['timeleft']} left")
         if download.get("speed"):
@@ -2754,7 +2765,7 @@ class Dashboard(commands.Cog):
 
             queued = (downloads or {}).get("queued_total") or 0
             if queued or (self.always_show_stats and self.panels["downloads"]
-                          and self._sab_enabled()):
+                          and self._downloads_enabled()):
                 stats.append(
                     f"{self._emoji('downloading')} `{queued}` "
                     f"Download{'s' if queued != 1 else ''}".strip()
@@ -2796,7 +2807,7 @@ class Dashboard(commands.Cog):
                 queued = (downloads or {}).get("queued_total") or 0
                 if queued or (self.always_show_stats
                               and self.panels["downloads"]
-                              and self._sab_enabled()):
+                              and self._downloads_enabled()):
                     self._pending_stats.append(
                         (self._label("downloading",
                                      f"Download{'s' if queued != 1 else ''}"),
@@ -3067,7 +3078,7 @@ class Dashboard(commands.Cog):
         self._divider(embed)
 
         # --- downloads (queue speed folded in as the last line) ---
-        if self.panels["downloads"] and self._sab_enabled():
+        if self.panels["downloads"] and self._downloads_enabled():
             queue = downloads.get("downloads") or []
             if queue:
                 total_queued = downloads.get("queued_total") or len(queue)
@@ -4951,11 +4962,13 @@ class Dashboard(commands.Cog):
     def _observe_queue(self, downloads) -> None:
         """Notice completions by watching jobs leave the queue.
 
-        SABnzbd's history is the obvious source and it is empty here:
-        Sonarr and Radarr delete the entry the moment they import, so by the
-        time anything asks, the record is gone. What cannot be deleted out
-        from under us is the queue itself, which this bot already polls
-        every few seconds.
+        The download client's history is the obvious source and it is
+        often empty: Sonarr and Radarr delete SABnzbd's entry (or remove the
+        torrent) the moment they import, so by the time anything asks, the
+        record is gone. What cannot be deleted out from under us is the
+        queue itself, which this bot already polls every few seconds.
+        A torrent leaves the queue when it stops downloading, seeding or
+        not.
 
         So: remember every job and how far along it was. When an id
         disappears, it either finished or was cancelled, and the last
@@ -4971,7 +4984,7 @@ class Dashboard(commands.Cog):
             return                       # queue unreadable; assume nothing
         current = {}
         for slot in slots:
-            key = str(slot.get("nzo_id") or "")
+            key = str(slot.get("id") or "")
             if key:
                 current[key] = slot
 
@@ -5023,23 +5036,22 @@ class Dashboard(commands.Cog):
         """
         # Cached, because build_embed now runs on the page-flip path too.
         # A flip is a person waiting on a button; making it wait on a
-        # SABnzbd round-trip would add latency to the one interaction in
-        # this bot that is measured in human patience rather than minutes.
+        # download-client round-trip would add latency to the one
+        # interaction in this bot that is measured in human patience rather
+        # than minutes.
         now = time.monotonic()
         if (self._recent_cache is not None
                 and now - self._recent_cache_at < self.recent_cache_seconds):
             return self._recent_cache
 
-        cog = self.bot.get_cog("SABnzbd")
-        if cog is not None and not getattr(cog, "enabled", False):
-            cog = None
+        cog = self._downloads_cog()
         arr_enabled = any(c.enabled for c in self._arr)
         if cog is None and not arr_enabled:
             # Nothing could ever fill it: no panel at all, rather than a
             # permanent "not configured" on a Plex-only install.
             return None
         # Source order is deliberate: *arr knows the import succeeded and
-        # knows the real title, SABnzbd knows the download finished, and the
+        # knows the real title, the download client knows it finished, and the
         # local ledger knows only that a job left the queue. Each fills what
         # the one before it cannot see.
         done: List[Dict[str, Any]] = []
@@ -5068,7 +5080,7 @@ class Dashboard(commands.Cog):
             except Exception as exc:                   # never break the loop
                 logger.warning("Recent downloads lookup failed: %s", exc)
 
-        # History first -- it is SABnzbd's own verdict, and it carries the
+        # History first -- it is the download client's own verdict, and it carries the
         # fail_message that separates "finished" from "gave up". The locally
         # observed ledger fills the gap when history has been deleted by
         # whatever imported the download.

@@ -145,7 +145,7 @@
         "uptime_update_interval": 300,
         "down_confirmations": 2
     },
-    "sabnzbd": {
+    "downloads": {
         "max_items": 4,
         "max_name_length": 45,
         "keywords": [
