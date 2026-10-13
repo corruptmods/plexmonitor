@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1
+
+A small one that makes the "Now on Plex" posts look a lot better. 🍿
+
+- **Posters are tall now.** They used to be cropped to a small square, so you'd
+  often see a face or a corner instead of the art. Now the whole poster shows,
+  the way it was meant to look.
+
+Everything else in the post is the same: the title, the summary, who asked for
+it, and the **Watch on Plex** and **Open in Seerr** buttons. Nothing to change
+on your side.
+
 ## 1.1.0
 
 Bring your own download client! 🎉 PlexMonitor now works with every one Seerr

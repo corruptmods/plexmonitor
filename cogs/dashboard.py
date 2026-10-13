@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover
     WEB_AVAILABLE = False
 
 from util.jsonfile import data_dir, read_json, write_json
+from util.requestui import ANNOUNCE_MARK
 from util.formatting import (
     discord_timestamp, format_bitrate, format_count,
     format_duration, format_duration_long, format_hms,
@@ -58,7 +59,7 @@ logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.1.0"
+BUILD = "v1.1.1"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -71,7 +72,13 @@ OWN_ID_PREFIXES = ("plex-monitor:",)
 
 
 def not_ours(message) -> bool:
-    """True when a message carries a button or menu this bot didn't mint."""
+    """True when a message isn't one of the dashboard's own: it carries a
+    button or menu the dashboard didn't mint, or it's a "Now on Plex" post
+    (an embed too, so only its author line tells it apart)."""
+    for embed in getattr(message, "embeds", None) or []:
+        author = getattr(getattr(embed, "author", None), "name", None)
+        if author == ANNOUNCE_MARK:
+            return True
     def walk(items):
         for item in items or []:
             yield item

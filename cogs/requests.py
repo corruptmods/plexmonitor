@@ -48,6 +48,8 @@ MAX_ATTEMPTS = 3
 LINK_ASK_GAP = 600.0
 # Between one person's tries at naming their account.
 LINK_TRY_GAP = 10.0
+# The green of a "Now on Plex" post.
+ANNOUNCE_COLOUR = 0x23A55A
 DEFAULTS = {
     "enabled": True,
     "announce_channel_id": 0,
@@ -1143,37 +1145,39 @@ class Requests(commands.Cog):
             seasons.extend(int(s["seasonNumber"])
                            for s in request.get("seasons") or []
                            if s.get("seasonNumber") is not None)
-        lines = ["### 🍿 Now on Plex",
-                 f"**{requestui._esc(seerrapi.display_title(summary))}**"]
+        # A classic embed rather than a Components V2 card: an embed's
+        # thumbnail keeps the poster's own shape (tall), where a V2
+        # section's thumbnail is always cropped to a square.
+        embed = discord.Embed(title=seerrapi.display_title(summary)[:256],
+                              colour=ANNOUNCE_COLOUR)
+        embed.set_author(name=requestui.ANNOUNCE_MARK)
+        lines = []
         if kind == "tv" and seasons:
-            lines.append(f"-# {requestui.season_label(sorted(set(seasons)))}")
+            lines.append(f"*{requestui.season_label(sorted(set(seasons)))}*")
         if summary["overview"]:
             lines.append(requestui._esc(requestui._clip(summary["overview"],
-                                                        240)))
+                                                        300)))
+        if lines:
+            embed.description = "\n".join(lines)
+        if summary["poster_url"]:
+            embed.set_thumbnail(url=summary["poster_url"])
         if names:
-            lines.append("-# Requested by "
-                         + ", ".join(requestui._esc(n) for n in names))
-        text = ui.TextDisplay("\n".join(lines))
-        head = ui.Section(text, accessory=ui.Thumbnail(summary["poster_url"])) \
-            if summary["poster_url"] else text
-        buttons = []
+            embed.set_footer(text=requestui._clip(
+                "Requested by " + ", ".join(names), 2048))
         plex_url = summary.get("plex_url") or next(
             (seerrapi.plex_web_url((r.get("media") or {}).get("mediaUrl"))
              for r in batch if (r.get("media") or {}).get("mediaUrl")), "")
+        view = ui.View(timeout=None)
         if plex_url.startswith("http"):
-            buttons.append(ui.Button(label="Watch on Plex", emoji="▶️",
-                                     url=plex_url,
-                                     style=discord.ButtonStyle.link))
+            view.add_item(ui.Button(label="Watch on Plex", emoji="▶️",
+                                    url=plex_url,
+                                    style=discord.ButtonStyle.link))
         link = await self.seerr.media_link(kind, int(tmdb_id))
         if link.startswith("http"):
-            buttons.append(ui.Button(label="Open in Seerr", url=link,
-                                     style=discord.ButtonStyle.link))
-        children: List[ui.Item] = [head]
-        if buttons:
-            children.append(ui.ActionRow(*buttons))
-        view = requestui.Card()
-        view.add_item(ui.Container(*children, accent_colour=0x23A55A))
-        await channel.send(view=view,
+            view.add_item(ui.Button(label="Open in Seerr", url=link,
+                                    style=discord.ButtonStyle.link))
+        await channel.send(embed=embed,
+                           view=view if view.children else discord.utils.MISSING,
                            allowed_mentions=discord.AllowedMentions.none())
         logger.info("Announced %s (%s) to #%s", summary["title"],
                     ", ".join(str(r.get("id")) for r in batch),

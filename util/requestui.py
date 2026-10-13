@@ -20,6 +20,11 @@ from util import seerr as seerrapi
 
 logger = logging.getLogger("plexmonitor.requestui")
 
+# The author line of every "Now on Plex" post. The dashboard's tidy-ups
+# recognise the posts by it, so they're never mistaken for its own embeds
+# when they share a channel.
+ANNOUNCE_MARK = "🍿 Now on Plex"
+
 ACCENT = {
     "available": 0x23A55A,
     "partial": 0x3BA55C,
