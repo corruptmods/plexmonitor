@@ -100,7 +100,7 @@ cleanly rather than erroring:
 
 | Feature | Settings |
 |---|---|
-| Downloads in progress | SABnzbd (`SABNZBD_URL`, `SABNZBD_API_KEY`) and/or qBittorrent (`QBITTORRENT_URL`, `QBITTORRENT_USERNAME`, `QBITTORRENT_PASSWORD`) |
+| Downloads in progress | Any of SABnzbd, NZBGet, qBittorrent, Transmission, Deluge and rTorrent (`SABNZBD_*`, `NZBGET_*`, `QBITTORRENT_*`, `TRANSMISSION_*`, `DELUGE_*`, `RTORRENT_*`; see below) |
 | Recently downloaded, with proper titles | `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY` |
 | Uptime figures | `UPTIMEROBOT_API_KEY` (wins if set), or Uptime Kuma 2.x (`UPTIME_*`, below) |
 | Requests, `/issue`, "Now on Plex" | `SEERR_URL`, `SEERR_API_KEY` (below) |
@@ -285,30 +285,46 @@ with the URL is trigger refreshes, which are rate limited anyway.
 
 ### Download clients
 
-PlexMonitor reads the download clients Seerr AI supports: **SABnzbd** and
-**qBittorrent**, either or both. Their queues show as one **Downloading**
-panel, busiest first, with the combined speed. A job that isn't moving says
-why: *paused*, *queued*, *checking*, *getting metadata*, or *stalled, no
-peers* for a torrent nobody is sharing.
+PlexMonitor reads the download clients Seerr AI supports, as many as you use:
 
-For qBittorrent, set `QBITTORRENT_URL` to its Web UI address. The bot signs in
-with `QBITTORRENT_USERNAME` and `QBITTORRENT_PASSWORD` and keeps the session,
-so it doesn't sign in on every refresh. Leave them blank only if qBittorrent
-lets this bot's address in without signing in (Options → Web UI → *Bypass
-authentication for clients in whitelisted IP subnets*). A torrent leaves the
-panel once it finishes downloading, whether it seeds or not. If qBittorrent
-also holds torrents that have nothing to do with Plex, set
-`QBITTORRENT_CATEGORIES` to the categories Radarr and Sonarr use (for example
-`radarr,tv-sonarr`).
+| Client | Settings | Signs in with |
+|---|---|---|
+| SABnzbd | `SABNZBD_URL`, `SABNZBD_API_KEY` | its API key (Config → General → Security) |
+| NZBGet | `NZBGET_URL`, `NZBGET_USERNAME`, `NZBGET_PASSWORD` | its control username and password |
+| qBittorrent | `QBITTORRENT_URL`, `QBITTORRENT_USERNAME`, `QBITTORRENT_PASSWORD` | its Web UI login, kept as a session |
+| Transmission | `TRANSMISSION_URL`, `TRANSMISSION_USERNAME`, `TRANSMISSION_PASSWORD` | its RPC login, if it has one |
+| Deluge | `DELUGE_URL`, `DELUGE_PASSWORD` | its Web UI password |
+| rTorrent | `RTORRENT_URL`, `RTORRENT_USERNAME`, `RTORRENT_PASSWORD` | the login of the web server in front of it (usually ruTorrent's) |
+
+Each address is the client's Web UI, e.g. `http://192.168.1.10:8080`.
+Transmission's RPC path (`/transmission/rpc`) is added for you. rTorrent's
+address is its XML-RPC endpoint, usually `http://<host>/RPC2`; `/RPC2` is
+added when the address has no path. Leave a username and password blank only
+when the client lets this bot in without one. For qBittorrent that's Options
+→ Web UI → *Bypass authentication for clients in whitelisted IP subnets*.
+
+All their queues show as one **Downloading** panel, the ones actually moving
+first, with the combined speed. A job that isn't moving says why: *paused*,
+*queued*, *checking*, *getting metadata*, *stalled, no peers* for a torrent
+nobody is sharing, or *unpacking*, *repairing* and the like while NZBGet
+finishes one. A torrent leaves the panel once it finishes downloading,
+whether it seeds or not.
+
+If a client also holds downloads that have nothing to do with Plex, set
+`DOWNLOAD_CATEGORIES` to the categories Radarr and Sonarr use (for example
+`radarr,tv-sonarr`). That means the category in SABnzbd, NZBGet and
+qBittorrent, and the label in Transmission, Deluge (its Label plugin) and
+ruTorrent. Set `DOWNLOAD_VERIFY_SSL=false` if a client uses a self-signed
+HTTPS certificate.
 
 **Completed Downloads** lists what just finished. With Radarr or Sonarr set
-up, it lists only what they imported (a download that finished but failed to
-import isn't news). Without them, it uses SABnzbd's history, qBittorrent's
-finished torrents, and what the bot saw leave the queue at 100%.
+up, it lists only what they imported, since a download that finished but
+failed to import isn't news. Without them, it uses each client's own record
+of finished jobs, and what the bot saw leave the queue at 100%.
 
 The `downloads` section of `data/config.json` (`max_items`, `max_name_length`,
-and `keywords`, which trims release tags like `1080p` off names) covers both
-clients. An older config's `sabnzbd` section is still read when there's no
+and `keywords`, which trims release tags like `1080p` off names) covers every
+client. An older config's `sabnzbd` section is still read when there's no
 `downloads` one.
 
 ### Stream cards channel
@@ -402,7 +418,7 @@ your client. Custom emoji also **never** render inside a code block, so with
 
 `total_space` reports **SABnzbd's** download volume — usually a scratch disk
 rather than media storage — so it's off by default. The download panels only
-appear when SABnzbd or qBittorrent (or, for finished downloads, Radarr or
+appear when a download client (or, for finished downloads, Radarr or
 Sonarr) is set up.
 
 ### Stream card percent

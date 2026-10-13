@@ -1,40 +1,26 @@
-"""qBittorrent: the torrents still downloading, and recently finished ones,
-over its Web API (v2).
+"""qBittorrent, over its Web API (v2).
 
-qBittorrent signs a session in with a cookie (SID). It's kept between
-calls and renewed only when qBittorrent turns it down, so the dashboard
-doesn't sign in on every refresh. With no username set, qBittorrent is
-expected to let this address in without signing in (its "Bypass
-authentication for clients on localhost / in whitelisted IP subnets").
-
-The cookie is handled by hand rather than by aiohttp's cookie jar, which
-refuses cookies from bare IP addresses -- how most people reach
-qBittorrent on their LAN.
-
-Every method returns plain data in the shape cogs/downloads.py merges with
-the other download clients, and never raises.
+qBittorrent signs a session in with a cookie (SID). It's kept between calls
+and renewed only when qBittorrent turns it down. With no username,
+qBittorrent is expected to let this address in without signing in (its
+"Bypass authentication for clients in whitelisted IP subnets"). The cookie
+is handled by hand: aiohttp's cookie jar refuses cookies from bare IP
+addresses, which is how most people reach qBittorrent on their LAN.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Tuple
 
-import aiohttp
+from util.downloadclient import (DownloadClient, DownloadClientError,
+                                 eta_text, number)
 
-logger = logging.getLogger("plexmonitor.qbittorrent")
-
-# qBittorrent's "no estimate" for eta.
-ETA_UNKNOWN = 8_640_000
-
-# Torrents that are done downloading (seeding or stopped after it). Those
-# leave the queue; the rest are shown, with what they're doing when it isn't
-# plain downloading. qBittorrent 5 renamed paused* to stopped*.
+# Done downloading (seeding, or stopped after). qBittorrent 5 renamed
+# paused* to stopped*.
 DONE_STATES = frozenset({"uploading", "forcedUP", "stalledUP", "queuedUP",
                          "pausedUP", "stoppedUP"})
-STATE_LABELS = {
+STATE_WORDS = {
     "downloading": "",
     "forcedDL": "",
     "stalledDL": "stalled, no peers",
@@ -51,82 +37,52 @@ STATE_LABELS = {
     "error": "error",
     "missingFiles": "missing files",
 }
-# Shown first: actually moving bytes.
-ACTIVE_STATES = frozenset({"downloading", "forcedDL"})
 
 
-def _float(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def eta_text(seconds: Any) -> str:
-    """qBittorrent's eta in seconds -> SABnzbd's "H:MM:SS" style."""
-    value = int(_float(seconds, -1))
-    if value <= 0 or value >= ETA_UNKNOWN:
-        return ""
-    hours, rest = divmod(value, 3600)
-    minutes, secs = divmod(rest, 60)
-    return f"{hours}:{minutes:02d}:{secs:02d}"
-
-
-class QbittorrentClient:
+class QbittorrentClient(DownloadClient):
     name = "qBittorrent"
 
     def __init__(self, url: str, username: str = "", password: str = "",
-                 categories: Iterable[str] = (),
-                 verify_ssl: bool = True) -> None:
-        self.url = (url or "").rstrip("/")
+                 **kwargs: Any) -> None:
+        super().__init__(url, **kwargs)
         self.username = username or ""
         self.password = password or ""
-        # Only torrents in these categories (all when empty), so torrents
-        # that have nothing to do with Plex stay off the dashboard.
-        self.categories = [c for c in (s.strip() for s in categories) if c]
-        self.verify_ssl = verify_ssl
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._lock = asyncio.Lock()
-        self._login_lock = asyncio.Lock()
         self._cookie = ""
-        self._warned_at = float("-inf")
+        self._login_lock = asyncio.Lock()
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        async with self._lock:
-            if self._session is None or self._session.closed:
-                self._session = aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=10),
-                    connector=aiohttp.TCPConnector(ssl=self.verify_ssl or False),
-                    # qBittorrent refuses requests whose Referer is another
-                    # site (its CSRF protection).
-                    headers={"Referer": self.url})
-            return self._session
+    def session_headers(self) -> Dict[str, str]:
+        # qBittorrent refuses requests whose Referer is another site.
+        return {"Referer": self.url}
 
-    async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
-
-    async def _sign_in(self, session: aiohttp.ClientSession) -> None:
+    async def _sign_in(self) -> None:
+        """Up to 5.1: 200 "Ok." / "Fails." and a cookie named SID. From
+        5.2: 204 with no body / 401, and the cookie is QBT_SID_<port>."""
+        session = await self.session()
         async with self._login_lock:
             async with session.post(
                     f"{self.url}/api/v2/auth/login",
                     data={"username": self.username,
                           "password": self.password}) as response:
                 text = (await response.text()).strip()
-                cookie = response.cookies.get("SID")
+                cookies = [f"{name}={morsel.value}"
+                           for name, morsel in response.cookies.items()
+                           if name == "SID" or name.startswith("QBT_SID_")]
                 if response.status == 403:
-                    raise _Refused("qBittorrent has temporarily banned this "
-                                   "address after failed sign-ins")
-                if text != "Ok." or cookie is None:
-                    raise _Refused("qBittorrent didn't accept the username or "
-                                   "password")
-                self._cookie = f"SID={cookie.value}"
+                    raise DownloadClientError(
+                        "it has temporarily banned this address after failed "
+                        "sign-ins")
+                accepted = (response.status == 204 or
+                            (response.status == 200 and text == "Ok."))
+                if not accepted or not cookies:
+                    raise DownloadClientError(
+                        "it didn't accept the username or password")
+                self._cookie = "; ".join(cookies)
 
     async def _get(self, path: str, **params: str) -> Any:
-        session = await self._get_session()
+        session = await self.session()
         for attempt in (1, 2):
             if self.username and not self._cookie:
-                await self._sign_in(session)
+                await self._sign_in()
             headers = {"Cookie": self._cookie} if self._cookie else {}
             async with session.get(f"{self.url}/api/v2{path}", params=params,
                                    headers=headers) as response:
@@ -134,99 +90,57 @@ class QbittorrentClient:
                     self._cookie = ""          # session expired: sign in again
                     continue
                 if response.status == 403:
-                    raise _Refused("qBittorrent refused the request (sign-in "
-                                   "needed: set QBITTORRENT_USERNAME and "
-                                   "QBITTORRENT_PASSWORD)")
+                    raise DownloadClientError(
+                        "it wants a sign-in: set QBITTORRENT_USERNAME and "
+                        "QBITTORRENT_PASSWORD")
                 if not response.ok:
-                    raise _Refused(f"qBittorrent returned HTTP {response.status}")
+                    raise DownloadClientError(f"HTTP {response.status}")
                 return await response.json(content_type=None)
         return None
 
-    async def _torrents(self, **params: str) -> Optional[List[Dict[str, Any]]]:
-        """Torrents in the configured categories, or None when unreadable."""
-        try:
-            if not self.categories:
-                data = await self._get("/torrents/info", **params)
-                return [t for t in data or [] if isinstance(t, dict)]
-            found: List[Dict[str, Any]] = []
-            for category in self.categories:
-                data = await self._get("/torrents/info", category=category,
-                                       **params)
-                found.extend(t for t in data or [] if isinstance(t, dict))
-            return found
-        except (_Refused, aiohttp.ClientError, asyncio.TimeoutError,
-                ValueError) as exc:
-            # Logged at most every 10 minutes: the dashboard asks often.
-            if time.monotonic() - self._warned_at > 600:
-                self._warned_at = time.monotonic()
-                logger.error("qBittorrent request failed: %s",
-                             exc if str(exc) else type(exc).__name__)
-            return None
+    async def _torrents(self, **params: str) -> List[Dict[str, Any]]:
+        data = await self._get("/torrents/info", **params)
+        return [t for t in data or [] if isinstance(t, dict)]
 
-    async def queue(self) -> Optional[Dict[str, Any]]:
-        """Torrents still downloading, active ones first, or None when
-        qBittorrent couldn't be read. Same shape as SabnzbdClient.queue."""
-        torrents = await self._torrents()
-        if torrents is None:
-            return None
-        waiting = [t for t in torrents
-                   if str(t.get("state") or "") not in DONE_STATES]
-        waiting.sort(key=lambda t: (
-            str(t.get("state") or "") not in ACTIVE_STATES,
-            -_float(t.get("progress"))))
+    async def fetch_queue(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        # Fully downloaded leaves the queue whatever it's doing now
+        # (rechecking after a restart, moving, gone missing while seeding):
+        # it would otherwise come back at 100% and count as a new
+        # completion each time it left again.
+        torrents = [t for t in await self._torrents()
+                    if str(t.get("state") or "") not in DONE_STATES
+                    and number(t.get("progress")) < 1
+                    and number(t.get("amount_left"), 1) > 0]
+        # Actually moving first, then furthest along.
+        torrents.sort(key=lambda t: (STATE_WORDS.get(str(t.get("state")), "")
+                                     != "", -number(t.get("progress"))))
         items = []
-        for torrent in waiting:
+        for torrent in torrents:
             state = str(torrent.get("state") or "")
-            items.append({
-                "id": f"qbit:{str(torrent.get('hash') or '').lower()}",
-                "name": torrent.get("name") or "Unknown",
-                "progress": max(0.0, min(100.0,
-                                         _float(torrent.get("progress")) * 100)),
-                "timeleft": eta_text(torrent.get("eta"))
-                if state in ACTIVE_STATES else "",
-                "size_bytes": _float(torrent.get("size"), -1),
-                "status": STATE_LABELS.get(state, ""),
-                "speed_bps": _float(torrent.get("dlspeed")),
-                "client": self.name,
-            })
-        return {
-            "items": items,
-            "speed_bps": sum(i["speed_bps"] for i in items),
-            "disk_free": None,
-            "disk_total": None,
-        }
+            status = STATE_WORDS.get(state, "")
+            items.append(self.item(
+                torrent.get("hash") or "", torrent.get("name"),
+                number(torrent.get("progress")) * 100,
+                number(torrent.get("size"), -1),
+                status=status,
+                timeleft="" if status else eta_text(torrent.get("eta")),
+                speed_bps=number(torrent.get("dlspeed")),
+                category=torrent.get("category")))
+        return items, {}
 
-    async def history(self, limit: int,
-                      max_age_hours: float = 0.0) -> List[Dict[str, Any]]:
-        """Torrents that finished downloading, newest first. A torrent
-        removed after its import (no seeding) is gone from here, which is
-        why the dashboard also watches the queue and asks Radarr/Sonarr."""
-        torrents = await self._torrents(filter="completed",
-                                        sort="completion_on", reverse="true")
-        if not torrents:
-            return []
-        cutoff = time.time() - max_age_hours * 3600.0 if max_age_hours > 0 \
-            else 0.0
-        done: List[Dict[str, Any]] = []
-        for torrent in sorted(torrents, reverse=True,
-                              key=lambda t: _float(t.get("completion_on"))):
+    async def fetch_history(self, limit: int) -> List[Dict[str, Any]]:
+        """Torrents that finished downloading. One removed after its import
+        (no seeding) is gone from here, which is why the dashboard also
+        watches the queue and asks Radarr/Sonarr."""
+        done = []
+        for torrent in await self._torrents(filter="completed"):
             if str(torrent.get("state") or "") in ("error", "missingFiles"):
-                continue
-            completed = _float(torrent.get("completion_on"))
-            if completed <= 0 or (cutoff and completed < cutoff):
                 continue
             done.append({
                 "name": torrent.get("name") or "Unknown",
                 "category": torrent.get("category") or "",
                 "size": "",
-                "bytes": int(_float(torrent.get("size"))),
-                "completed": completed,
-                "download_time": 0,
+                "bytes": int(number(torrent.get("size"))),
+                "completed": number(torrent.get("completion_on")),
             })
-            if len(done) >= limit:
-                break
         return done
-
-
-class _Refused(Exception):
-    """qBittorrent answered, but not with what was asked for."""

@@ -2,17 +2,19 @@
 
 ## 1.1.0
 
-PlexMonitor now works with qBittorrent as well as SABnzbd: the same download
-clients Seerr AI supports. Use either one, or both.
+PlexMonitor now works with every download client Seerr AI supports:
+**SABnzbd**, **NZBGet**, **qBittorrent**, **Transmission**, **Deluge** and
+**rTorrent**. Use one, or as many as you run.
 
-- The **Downloading** panel shows torrents still downloading next to your
-  SABnzbd queue, busiest first, with the combined speed.
+- The **Downloading** panel shows all of them together, the ones actually
+  moving first, with the combined speed.
 - Anything that isn't moving says why: paused, queued, checking, getting
-  metadata, or stalled with no peers.
-- **Completed Downloads** picks up finished torrents too.
-- New settings: `QBITTORRENT_URL`, `QBITTORRENT_USERNAME`,
-  `QBITTORRENT_PASSWORD`, and `QBITTORRENT_CATEGORIES` to show only the
-  categories Radarr and Sonarr use.
+  metadata, stalled with no peers, or unpacking and repairing while NZBGet
+  finishes up.
+- **Completed Downloads** picks up finished jobs from every client.
+- New settings for each client (see `.env.example`), plus
+  `DOWNLOAD_CATEGORIES` to show only the categories or labels Radarr and
+  Sonarr use, and `DOWNLOAD_VERIFY_SSL` for self-signed certificates.
 - The `sabnzbd` section of `data/config.json` is now called `downloads`. Your
   old one keeps working.
 

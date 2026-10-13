@@ -35,8 +35,9 @@ Seerr — with an optional AI assistant for "what should I watch?" questions.
   seconds when someone presses play, pause or stop.
 - **Real uptime.** Uptime is tracked across restarts, and the bot can read your
   real outage history from Uptime Kuma 2.x or UptimeRobot.
-- **Downloads.** What SABnzbd and qBittorrent are downloading (and why
-  something isn't moving: paused, queued, a torrent with no peers), plus what
+- **Downloads.** What your download clients are doing (SABnzbd, NZBGet,
+  qBittorrent, Transmission, Deluge or rTorrent, as many as you use), and why
+  something isn't moving: paused, queued, a torrent with no peers. Plus what
   Radarr and Sonarr just imported, under their proper titles.
 - **Request panel.** A pinned message with a **Request** button. Type a title
   to see whether it's already on Plex, then request it in one tap: a whole show
@@ -75,7 +76,8 @@ Optional:
   isn't required: it only adds its own AI answers, `/recap`, and automatic
   fixes for reported problems. With plain
   Seerr the assistant uses the bot's own AI model, if you give it one.
-- SABnzbd and/or qBittorrent, plus Radarr and Sonarr, for downloads
+- Any of SABnzbd, NZBGet, qBittorrent, Transmission, Deluge or rTorrent,
+  plus Radarr and Sonarr, for downloads
 - Uptime Kuma 2.x or UptimeRobot for uptime
 - A Claude or OpenAI API key, or a local model, for the assistant
 

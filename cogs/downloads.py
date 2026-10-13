@@ -1,8 +1,17 @@
 """Downloads cog -- every download client the dashboard reads, as one.
 
-The clients Seerr AI supports: SABnzbd (SABNZBD_URL, SABNZBD_API_KEY) and
-qBittorrent (QBITTORRENT_URL, plus QBITTORRENT_USERNAME/PASSWORD unless
-qBittorrent lets this address in without signing in). Any, both or neither.
+The clients Seerr AI supports, any number of them at once:
+
+  SABnzbd       SABNZBD_URL, SABNZBD_API_KEY
+  NZBGet        NZBGET_URL, NZBGET_USERNAME, NZBGET_PASSWORD
+  qBittorrent   QBITTORRENT_URL, QBITTORRENT_USERNAME, QBITTORRENT_PASSWORD
+  Transmission  TRANSMISSION_URL, TRANSMISSION_USERNAME, TRANSMISSION_PASSWORD
+  Deluge        DELUGE_URL, DELUGE_PASSWORD
+  rTorrent      RTORRENT_URL, RTORRENT_USERNAME, RTORRENT_PASSWORD
+
+DOWNLOAD_CATEGORIES (comma-separated) limits every client to those
+categories (labels, for the torrent clients that call them that), and
+DOWNLOAD_VERIFY_SSL=false accepts self-signed certificates.
 
 The dashboard asks this cog, never a client:
 
@@ -25,9 +34,13 @@ from typing import Any, Dict, List
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from util.deluge import DelugeClient
 from util.jsonfile import data_dir, read_json
+from util.nzbget import NzbgetClient
 from util.qbittorrent import QbittorrentClient
+from util.rtorrent import RtorrentClient
 from util.sabnzbd import SabnzbdClient
+from util.transmission import TransmissionClient
 
 if os.getenv("RUNNING_IN_DOCKER", "false").lower() != "true":
     load_dotenv()
@@ -72,25 +85,14 @@ def _empty() -> Dict[str, Any]:
 class Downloads(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.clients: List[Any] = []
-        if os.getenv("SABNZBD_URL") and os.getenv("SABNZBD_API_KEY"):
-            self.clients.append(SabnzbdClient(os.environ["SABNZBD_URL"],
-                                              os.environ["SABNZBD_API_KEY"]))
-        if os.getenv("QBITTORRENT_URL"):
-            self.clients.append(QbittorrentClient(
-                os.environ["QBITTORRENT_URL"],
-                os.getenv("QBITTORRENT_USERNAME", ""),
-                os.getenv("QBITTORRENT_PASSWORD", ""),
-                categories=os.getenv("QBITTORRENT_CATEGORIES", "").split(","),
-                verify_ssl=os.getenv("QBITTORRENT_VERIFY_SSL", "true")
-                .lower() != "false"))
+        self.clients: List[Any] = self.configured_clients()
         self.enabled = bool(self.clients)
         if self.enabled:
             logger.info("Download clients: %s",
                         ", ".join(c.name for c in self.clients))
         else:
-            logger.info("No download client set (SABnzbd or qBittorrent) -- "
-                        "download panels disabled")
+            logger.info("No download client set -- download panels "
+                        "disabled")
 
         config = read_json(os.path.join(data_dir(), "config.json"), {})
         config = config if isinstance(config, dict) else {}
@@ -103,6 +105,38 @@ class Downloads(commands.Cog):
                                     if isinstance(keywords, list) else [])
         self.max_items: int = _int(section.get("max_items"), 4)
         self.max_name_length: int = _int(section.get("max_name_length"), 45)
+
+    @staticmethod
+    def configured_clients() -> List[Any]:
+        env = os.getenv
+        shared = {
+            "categories": env("DOWNLOAD_CATEGORIES", "").split(","),
+            "verify_ssl": env("DOWNLOAD_VERIFY_SSL", "true").lower() != "false",
+        }
+        clients: List[Any] = []
+        if env("SABNZBD_URL") and env("SABNZBD_API_KEY"):
+            clients.append(SabnzbdClient(env("SABNZBD_URL"),
+                                         env("SABNZBD_API_KEY"), **shared))
+        if env("NZBGET_URL"):
+            clients.append(NzbgetClient(env("NZBGET_URL"),
+                                        env("NZBGET_USERNAME", ""),
+                                        env("NZBGET_PASSWORD", ""), **shared))
+        if env("QBITTORRENT_URL"):
+            clients.append(QbittorrentClient(
+                env("QBITTORRENT_URL"), env("QBITTORRENT_USERNAME", ""),
+                env("QBITTORRENT_PASSWORD", ""), **shared))
+        if env("TRANSMISSION_URL"):
+            clients.append(TransmissionClient(
+                env("TRANSMISSION_URL"), env("TRANSMISSION_USERNAME", ""),
+                env("TRANSMISSION_PASSWORD", ""), **shared))
+        if env("DELUGE_URL"):
+            clients.append(DelugeClient(env("DELUGE_URL"),
+                                        env("DELUGE_PASSWORD", ""), **shared))
+        if env("RTORRENT_URL"):
+            clients.append(RtorrentClient(
+                env("RTORRENT_URL"), env("RTORRENT_USERNAME", ""),
+                env("RTORRENT_PASSWORD", ""), **shared))
+        return clients
 
     async def cog_unload(self) -> None:
         for client in self.clients:
