@@ -596,6 +596,31 @@ class Assistant(commands.Cog):
                         library_stats),
             ]
 
+        downloads = self.bot.get_cog("Downloads")
+        if downloads is not None and getattr(downloads, "enabled", False):
+            async def downloading():
+                info = await downloads.get_info()
+                jobs = [{"title": downloads.clean_name(d.get("name") or ""),
+                         "progress_percent": round(float(d.get("progress")
+                                                         or 0)),
+                         "time_left": d.get("timeleft") or None,
+                         "not_moving_because": d.get("status") or None,
+                         "client": d.get("client") or None}
+                        for d in info.get("downloads") or []]
+                total = int(info.get("queued_total") or 0)
+                if not total:
+                    return "Nothing is downloading right now."
+                return {"downloading": jobs, "jobs_in_total": total,
+                        "jobs_not_listed": max(0, total - len(jobs)),
+                        "combined_speed": info.get("speed") or None}
+
+            tools.append(ai.Tool(
+                "downloading",
+                "What the download clients are downloading right now: each "
+                "job's progress, time left, and why it isn't moving if it "
+                "isn't (paused, queued, no peers). Names are release names.",
+                {"type": "object", "properties": {}}, downloading))
+
         tautulli = getattr(dashboard, "tautulli", None)
         if seerr is not None and tautulli is not None:
             async def my_watch_history(limit: int = 15):

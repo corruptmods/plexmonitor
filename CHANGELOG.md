@@ -12,6 +12,9 @@ PlexMonitor now works with every download client Seerr AI supports:
   metadata, stalled with no peers, or unpacking and repairing while NZBGet
   finishes up.
 - **Completed Downloads** picks up finished jobs from every client.
+- The assistant's own AI model can now answer "is Dune still downloading?":
+  it sees what every client is downloading, how far along and how long is
+  left. (With Seerr AI, Seerr AI's own AI answers instead.)
 - New settings for each client (see `.env.example`), plus
   `DOWNLOAD_CATEGORIES` to show only the categories or labels Radarr and
   Sonarr use, and `DOWNLOAD_VERIFY_SSL` for self-signed certificates.

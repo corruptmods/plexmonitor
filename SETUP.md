@@ -260,9 +260,9 @@ own model (default 25). Seerr AI keeps its own limit. Set `assistant.dms` to
 `false` to turn off DM chat, or `assistant.delete_mentions` to `false` to leave
 mentions in the channel.
 
-The bot's own model can look things up in Seerr and see what's playing, what
-just finished downloading, library sizes, and the asker's own requests and watch
-history. Neither AI **files requests**. Suggested titles come back one per page
+The bot's own model can look things up in Seerr and see what's playing, what's
+downloading right now (from every download client), what Radarr and Sonarr
+just imported, library sizes, and the asker's own requests and watch history. Neither AI **files requests**. Suggested titles come back one per page
 (◀ ▶ to flip), with a Request button the person presses themselves, or **Watch on
 Plex** when it's already there.
 
