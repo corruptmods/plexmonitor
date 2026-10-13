@@ -2,27 +2,33 @@
 
 ## 1.1.0
 
-PlexMonitor now works with every download client Seerr AI supports:
-**SABnzbd**, **NZBGet**, **qBittorrent**, **Transmission**, **Deluge** and
-**rTorrent**. Use one, or as many as you run.
+Bring your own download client! 🎉 PlexMonitor now works with every one Seerr
+AI supports: **SABnzbd**, **NZBGet**, **qBittorrent**, **Transmission**,
+**Deluge** and **rTorrent**. Run one, or mix and match.
 
-- The **Downloading** panel shows all of them together, the ones actually
-  moving first, with the combined speed.
-- Anything that isn't moving says why: paused, queued, checking, getting
-  metadata, stalled with no peers, or unpacking and repairing while NZBGet
-  finishes up.
-- **Completed Downloads** picks up finished jobs from every client.
-- The assistant's own AI model can now answer "is Dune still downloading?":
-  it sees what every client is downloading, how far along and how long is
-  left. (With Seerr AI, Seerr AI's own AI answers instead.)
-- New settings for each client (see `.env.example`), plus
-  `DOWNLOAD_CATEGORIES` to show only the categories or labels Radarr and
-  Sonarr use, and `DOWNLOAD_VERIFY_SSL` for self-signed certificates.
-- The `sabnzbd` section of `data/config.json` is now called `downloads`. Your
-  old one keeps working.
+**What's new**
 
-Updating by copying files over the old ones? You can delete `cogs/sabnzbd.py`;
-the bot skips it either way.
+- **One Downloading panel for everything.** All your clients show up
+  together, with what's actually moving at the top and the total speed.
+- **It tells you why something's stuck.** Paused, queued, checking, waiting on
+  peers, or unpacking: no more guessing why a download sits at 40%.
+- **Completed Downloads covers every client**, not just SABnzbd.
+- **Ask the assistant "is Dune still downloading?"** and get a real answer:
+  how far along it is and how long is left. (If you use Seerr AI, its own AI
+  answers as before.)
+
+**Setting it up**
+
+Add your client's address and login to `.env`. `.env.example` has a short
+section for each one. If a client also handles downloads that aren't for
+Plex, set `DOWNLOAD_CATEGORIES` to the categories Radarr and Sonarr use.
+
+**Upgrading**
+
+Nothing to change: your SABnzbd setup keeps working as it is. The `sabnzbd`
+section of `data/config.json` is now called `downloads`, and the old name
+still works. If you update by copying files over the old ones, you can delete
+`cogs/sabnzbd.py`. The bot ignores it either way.
 
 ## 1.0.0
 
