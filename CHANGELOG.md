@@ -9,8 +9,19 @@ A small one that makes the "Now on Plex" posts look a lot better. 🍿
   the way it was meant to look.
 
 Everything else in the post is the same: the title, the summary, who asked for
-it, and the **Watch on Plex** and **Open in Seerr** buttons. Nothing to change
-on your side.
+it, and the **Watch on Plex** and **Open in Seerr** buttons.
+
+**Security updates**
+
+- **aiohttp 3.14.5**, which fixes the advisories published for 3.14.3. The one
+  that matters most here is the Tautulli webhook listener, which a malicious
+  client on your network could tie up or slow down.
+- **Pillow 13.0.0**, which fixes its advisories for opening untrusted image
+  files. PlexMonitor only draws its own progress bars and never opens outside
+  images, so it wasn't really exposed, but there's no reason to stay behind.
+
+Nothing to change on your side: rebuild (or pull the new image) and you're
+done.
 
 ## 1.1.0
 
