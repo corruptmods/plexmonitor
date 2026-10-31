@@ -16,6 +16,17 @@ fixes. Nothing new to set up.
 - **Pressing Request twice quickly** files one request, not two.
 - **"Now on Plex" posts aren't lost** when Discord or Seerr has a bad few
   minutes. The bot keeps trying until the post goes through.
+- **Fast downloads show up in Completed Downloads** when it goes by your
+  download clients (no Radarr/Sonarr). One that went from half-way to done
+  between two refreshes used to count as cancelled.
+- **No more frozen leftovers.** Move the dashboard or the stream cards to
+  another channel, or turn the separate Completed Downloads message off, and
+  the old message is taken down instead of sitting there with its buttons
+  still live.
+- **Stream cards in their own channel can't hold up the dashboard.** Discord
+  limits edits per channel, and the bot now keeps track of each channel
+  separately, so a busy cards channel no longer makes the dashboard skip a
+  refresh.
 - **The dashboard's images stop flickering** after a day of uptime.
 - **Stream cards sharing the dashboard's channel** no longer delete the
   dashboard on restart.

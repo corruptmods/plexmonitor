@@ -16,8 +16,9 @@ DOWNLOAD_VERIFY_SSL=false accepts self-signed certificates.
 The dashboard asks this cog, never a client:
 
   get_info()     the queue: the first few jobs for display, every job's id
-                 (to notice completions), the total count, combined speed,
-                 and which clients couldn't be read
+                 and time left (to notice completions), the jobs that
+                 finished, the total count, combined speed, and which
+                 clients couldn't be read
   get_history()  recently finished jobs, newest first, from every client
   clean_name()   a release name trimmed for display
 
@@ -200,6 +201,7 @@ class Downloads(commands.Cog):
         results = await asyncio.gather(*(c.queue() for c in self.clients),
                                        return_exceptions=True)
         items: List[Dict[str, Any]] = []
+        finished: List[str] = []
         speed = 0.0
         disk_free = disk_total = None
         unreachable: List[str] = []
@@ -210,6 +212,7 @@ class Downloads(commands.Cog):
                 unreachable.append(client.name)
                 continue
             items.extend(result["items"])
+            finished.extend(result.get("finished") or [])
             speed += result.get("speed_bps") or 0.0
             disk_free = disk_free or result.get("disk_free")
             disk_total = disk_total or result.get("disk_total")
@@ -235,7 +238,11 @@ class Downloads(commands.Cog):
                 "name": item["name"],
                 "progress": item["progress"],
                 "size": format_size(item.get("size_bytes", -1)),
+                "status": item.get("status") or "",
+                "eta_s": item.get("eta_s"),
             } for item in items],
+            # Jobs the clients still hold that are done downloading.
+            "finished": finished,
         }
         return info
 

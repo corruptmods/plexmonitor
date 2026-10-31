@@ -477,6 +477,19 @@ class Dashboard(commands.Cog):
         self.recent_message_id = (stored_recent.get("message_id")
                                   if isinstance(stored_recent, dict) else None)
         self._recent_payload: Optional[str] = None
+        # Where each tracked message is, as saved with its id: a message
+        # left behind when its channel (or its setting) changes is taken
+        # down on the next start (see _retire_moved).
+        self._id_files = {"dashboard": self.message_id_file,
+                          "cards": self.cards_id_file,
+                          "recent": self.recent_id_file}
+        self._stored_channels: Dict[str, Optional[int]] = {}
+        for what, saved in (("dashboard", stored), ("cards", stored_cards),
+                            ("recent", stored_recent)):
+            raw = saved.get("channel_id") if isinstance(saved, dict) else None
+            self._stored_channels[what] = (int(raw) if str(raw).isdigit()
+                                           else None)
+        self._moved_checked = False
         self._recent_cache = None
         self._recent_cache_at = 0.0
         self._recent_pending = None
@@ -3987,17 +4000,23 @@ class Dashboard(commands.Cog):
         """The bot's rate-limit observer, if instrumentation is available."""
         return getattr(self.bot, "rate_limits", None)
 
-    def _rate_wait(self) -> float:
-        rate = self._rate
-        return rate.edit_wait() if rate else 0.0
+    # The edit bucket is per channel: these read the dashboard channel's
+    # unless told another (the cards').
 
-    def _rate_describe(self) -> str:
+    def _rate_wait(self, channel_id: Optional[int] = None) -> float:
         rate = self._rate
-        return rate.describe() if rate else "no rate-limit data"
+        return rate.edit_wait(channel_id or self.channel_id) if rate else 0.0
 
-    def _rate_headroom(self) -> Optional[int]:
+    def _rate_describe(self, channel_id: Optional[int] = None) -> str:
         rate = self._rate
-        return rate.edit_headroom() if rate else None
+        return (rate.describe(channel_id or self.channel_id) if rate
+                else "no rate-limit data")
+
+    def _rate_headroom(self, channel_id: Optional[int] = None
+                       ) -> Optional[int]:
+        rate = self._rate
+        return (rate.edit_headroom(channel_id or self.channel_id) if rate
+                else None)
 
     def _item_interval(self, duration_ms: float) -> float:
         """Repaint spacing for ONE item, derived from its own runtime.
@@ -4130,7 +4149,7 @@ class Dashboard(commands.Cog):
             # getattr, not a bare call: an older or stubbed observer
             # without this method must degrade to halving, not raise.
             bucket_full = getattr(rate, "edit_bucket_full", None)
-            if callable(bucket_full) and bucket_full():
+            if callable(bucket_full) and bucket_full(self.channel_id):
                 self._throttle = 1
                 logger.info(
                     "Steady for %d refreshes and the edit bucket is full "
@@ -4177,7 +4196,8 @@ class Dashboard(commands.Cog):
             # the call. Elapsed time alone cannot tell a rate limit apart from
             # a slow attachment upload.
             before_429 = rate.count_429 if rate else 0
-            before_room = rate.edit_headroom() if rate else None
+            before_room = (rate.edit_headroom(getattr(channel, "id", None))
+                           if rate else None)
             try:
                 if files is None:
                     # Re-supplying the existing attachments keeps their
@@ -4296,10 +4316,11 @@ class Dashboard(commands.Cog):
                             "Edit took %.1fs uploading %d file(s) -- not "
                             "throttled", elapsed, len(files or []),
                         )
-                headroom = self._rate_headroom()
+                headroom = self._rate_headroom(getattr(channel, "id", None))
                 if headroom is not None and headroom <= 1:
                     logger.info("Edit budget nearly spent (%s)",
-                                self._rate_describe())
+                                self._rate_describe(
+                                    getattr(channel, "id", None)))
                 return True
             except asyncio.TimeoutError:
                 # discord.py swallows 429s: it sleeps out the penalty and
@@ -4356,7 +4377,7 @@ class Dashboard(commands.Cog):
         self._file_keys = dict(self._pending_keys)
         self._rendered_layout = self._pending_layout
         self.dashboard_message_id = message.id
-        self._write_json(self.message_id_file, {"message_id": message.id})
+        self._remember("dashboard", message.id, channel)
         logger.info("Created dashboard message %s", message.id)
         return True
 
@@ -4386,6 +4407,87 @@ class Dashboard(commands.Cog):
 
     async def _sweep_duplicates(self, channel) -> None:
         await self._sweep(channel, "dashboard")
+
+    def _remember(self, what: str, message_id, channel) -> None:
+        """Save a tracked message's id, and the channel it's in."""
+        channel_id = getattr(channel, "id", None) if message_id else None
+        self._stored_channels[what] = channel_id
+        self._write_json(self._id_files[what], {"message_id": message_id,
+                                                "channel_id": channel_id})
+
+    async def _delete_old(self, channel, message_id, what: str) -> None:
+        """Take down a message the dashboard no longer uses. `channel` is
+        the channel or its id."""
+        if not hasattr(channel, "fetch_message"):
+            channel = self.bot.get_channel(int(channel)) if channel else None
+        if channel is None:
+            logger.info("The old %s message %s is in a channel the bot can't "
+                        "see any more -- delete it by hand", what, message_id)
+            return
+        try:
+            old = await channel.fetch_message(int(message_id))
+            await old.delete()
+            logger.info("Took down the old %s message in #%s", what,
+                        getattr(channel, "name", "?"))
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as exc:
+            logger.warning("Could not take down the old %s message %s: %s",
+                           what, message_id, exc)
+
+    async def _retire_recent(self, channel) -> None:
+        """Take the separate Completed Downloads message down."""
+        if not self.recent_message_id:
+            return
+        await self._delete_old(channel, self.recent_message_id,
+                               "completed-downloads")
+        self.recent_message_id = None
+        self._recent_payload = None
+        self._remember("recent", None, None)
+
+    async def _retire_moved(self) -> None:
+        """Once per start: messages left where they no longer belong -- the
+        dashboard after CHANNEL_ID changed, the cards after
+        stream_cards.channel_id changed or was cleared (they're on the
+        dashboard then), Completed Downloads after either. Left up, each
+        sat frozen, the old pager's buttons still live.
+
+        A message saved by an older version has no channel with it; it's
+        taken to be where it belongs now, which is where it was unless the
+        setting changed in the same upgrade."""
+        self._moved_checked = True
+        recent_apart = self.recent_enabled and not self.recent_in_main
+        wanted = {"dashboard": self.channel_id,
+                  "cards": self.cards_channel_id or None,
+                  "recent": self.channel_id if recent_apart else None}
+        tracked = {"dashboard": "dashboard_message_id",
+                   "cards": "cards_message_id",
+                   "recent": "recent_message_id"}
+        for what, attr in tracked.items():
+            message_id = getattr(self, attr)
+            if not message_id:
+                continue
+            stored = self._stored_channels.get(what)
+            if stored is None:
+                # Saved before channels were: Completed Downloads always
+                # lived in the dashboard's channel; the others are assumed
+                # to be where they should.
+                stored = self.channel_id if what == "recent" else wanted[what]
+                if stored is None:
+                    continue
+                self._remember(what, message_id, self.bot.get_channel(stored)
+                               or discord.Object(id=stored))
+            if stored == wanted[what]:
+                continue
+            await self._delete_old(stored, message_id, {
+                "cards": "stream cards",
+                "recent": "completed-downloads"}.get(what, what))
+            setattr(self, attr, None)
+            self._remember(what, None, None)
+            if what == "cards":
+                self._cards_payload = None
+            elif what == "recent":
+                self._recent_payload = None
 
     async def _replace_message(self, channel, old_message) -> None:
         """Retire the dashboard message and post a fresh replacement.
@@ -4587,11 +4689,15 @@ class Dashboard(commands.Cog):
         editor = (getattr(interaction, "edit_original_response", None)
                   if interaction is not None else None)
         blocked = ""
+        # The pager is on the cards message when they have their own
+        # channel: that channel's bucket is the one the flip spends.
+        flip_channel = self.cards_channel_id or self.channel_id
         remaining = self._stalled_until - time.monotonic()
         if remaining > 0:
             blocked = f"rate limited for another {remaining:.0f}s"
-        elif self._rate_wait() > 0:
-            blocked = f"edit budget refills in {self._rate_wait():.1f}s"
+        elif self._rate_wait(flip_channel) > 0:
+            blocked = (f"edit budget refills in "
+                       f"{self._rate_wait(flip_channel):.1f}s")
         if blocked and interaction is None:
             # No press behind this render (a settled/deferred redraw), so
             # there is no token to borrow. The refresh loop draws it.
@@ -4976,12 +5082,18 @@ class Dashboard(commands.Cog):
         A torrent leaves the queue when it stops downloading, seeding or
         not.
 
-        So: remember every job and how far along it was. When an id
-        disappears, it either finished or was cancelled, and the last
-        progress reading says which. A job pulled at 40% was abandoned; one
-        last seen at ~100% completed. Cancelling something at 99% would
-        register as a completion -- an acceptable error for a panel whose
-        job is to say what landed.
+        So: remember every job, how far along it was and how long it had
+        left. When an id disappears, it either finished or was cancelled:
+          - the client still lists it as done downloading (a torrent
+            seeding): finished;
+          - it was last seen at ~100%: finished;
+          - it was downloading and due to finish by now (its time left,
+            with some slack, had run out since it was last seen): finished.
+            A fast download can go from 60% to done between two reads;
+          - otherwise (pulled at 40% with an hour to go): cancelled.
+        Cancelling something just before it would have finished counts as a
+        completion -- an acceptable error for a panel whose job is to say
+        what landed.
         """
         if not self.recent_enabled:
             return
@@ -4998,15 +5110,19 @@ class Dashboard(commands.Cog):
             if key:
                 current[key] = slot
 
+        finished = set((downloads or {}).get("finished") or [])
+        now = time.monotonic()
         changed = False
         for key, last in list(self._queue_seen.items()):
             if key in current or key.split(":", 1)[0] in unread:
                 continue
             self._queue_seen.pop(key, None)
-            if float(last.get("progress") or 0) < self.COMPLETION_PROGRESS:
+            progress = float(last.get("progress") or 0)
+            if not (key in finished or progress >= self.COMPLETION_PROGRESS
+                    or self._was_due(last, now)):
                 logger.info("Job left the queue at %.0f%% -- treating as "
-                            "cancelled, not completed: %s",
-                            float(last.get("progress") or 0), last.get("name"))
+                            "cancelled, not completed: %s", progress,
+                            last.get("name"))
                 continue
             self._completed.append({
                 "name": last.get("name") or "Unknown",
@@ -5019,12 +5135,31 @@ class Dashboard(commands.Cog):
         for key, slot in current.items():
             self._queue_seen[key] = {"name": slot.get("name"),
                                      "size": slot.get("size"),
-                                     "progress": slot.get("progress")}
+                                     "progress": slot.get("progress"),
+                                     "status": slot.get("status") or "",
+                                     "eta_s": slot.get("eta_s"),
+                                     "seen_at": now}
         if changed:
             self._prune_completed()
             self._write_json(self.completed_file,
                              {"items": self._completed})
             self._recent_cache = None    # surface it on the next build
+
+    # A vanished job counts as finished when its time left had run out
+    # since it was last seen, give or take: speeds wobble, so half as long
+    # again plus this much. Only within this window -- after a long gap (the
+    # bot or the client was away) nothing can be told from it.
+    DUE_SLACK = 30.0
+    DUE_WINDOW = 15 * 60.0
+
+    def _was_due(self, last: Dict[str, Any], now: float) -> bool:
+        """Whether a job that left the queue was due to finish by now."""
+        eta = last.get("eta_s")
+        if eta is None or last.get("status"):
+            return False                 # paused, queued, stalled: no clock
+        gone_for = now - float(last.get("seen_at") or now)
+        return (0 < gone_for <= self.DUE_WINDOW
+                and float(eta) <= gone_for * 1.5 + self.DUE_SLACK)
 
     def _prune_completed(self) -> None:
         """Age out old entries and cap the ledger."""
@@ -5275,16 +5410,9 @@ class Dashboard(commands.Cog):
         """
         embed, signature = await self._recent_embed()
         if embed is None:
-            if signature is None and self.recent_message_id:
+            if signature is None:
                 # No source can fill it any more: take the old one down.
-                try:
-                    old = await channel.fetch_message(self.recent_message_id)
-                    await old.delete()
-                except discord.HTTPException:
-                    pass
-                self.recent_message_id = None
-                self._recent_payload = None
-                self._write_json(self.recent_id_file, {"message_id": None})
+                await self._retire_recent(channel)
             return False
         if signature == self._recent_payload and self.recent_message_id:
             return True                       # nothing finished since last time
@@ -5324,8 +5452,7 @@ class Dashboard(commands.Cog):
                     embed=embed, file=strip) if strip else await channel.send(
                         embed=embed)
                 self.recent_message_id = message.id
-                self._write_json(self.recent_id_file,
-                                 {"message_id": message.id})
+                self._remember("recent", message.id, channel)
                 logger.info("Created recent-downloads message %s", message.id)
             elif strip is not None:
                 await asyncio.wait_for(
@@ -5382,8 +5509,7 @@ class Dashboard(commands.Cog):
             if message is None:
                 message = await channel.send(embeds=[self._idle_card_embed()])
                 self.cards_message_id = message.id
-                self._write_json(self.cards_id_file,
-                                 {"message_id": message.id})
+                self._remember("cards", message.id, channel)
                 logger.info("Created idle cards message %s in #%s",
                             message.id, getattr(channel, "name", "?"))
             else:
@@ -5435,7 +5561,7 @@ class Dashboard(commands.Cog):
                     pass
                 self.cards_message_id = None
                 self._cards_payload = None
-                self._write_json(self.cards_id_file, {"message_id": None})
+                self._remember("cards", None, None)
             return True
         self._cards_idle = False
 
@@ -5462,7 +5588,7 @@ class Dashboard(commands.Cog):
                 message = await channel.send(embeds=embeds,
                                              files=files or [], view=view)
                 self.cards_message_id = message.id
-                self._write_json(self.cards_id_file, {"message_id": message.id})
+                self._remember("cards", message.id, channel)
                 logger.info("Created cards message %s in #%s",
                             message.id, getattr(channel, "name", "?"))
             else:
@@ -5556,6 +5682,13 @@ class Dashboard(commands.Cog):
         # adoption afterwards (as an earlier build did) meant the first tick
         # after every restart had already committed to a full re-upload --
         # the adoption block never saved anything.
+        if not self._moved_checked:
+            try:
+                await self._retire_moved()
+            except Exception:
+                # Tidying up must never cost the dashboard its refresh.
+                self._moved_checked = True
+                logger.exception("Could not check for moved messages")
         message = None
         if self.dashboard_message_id:
             try:
@@ -5692,6 +5825,10 @@ class Dashboard(commands.Cog):
                 # In-main mode already rendered it as a field; pushing a
                 # second copy would say the same thing twice.
                 await self._push_recent(channel)
+            elif self.recent_message_id:
+                # Turned off, or moved into the dashboard: the separate
+                # message would otherwise sit there frozen.
+                await self._retire_recent(channel)
             # Recorded only when the content actually reached Discord. A
             # stalled or rejected edit must stay eligible for retry, or the
             # dedupe check would suppress the failed content forever.

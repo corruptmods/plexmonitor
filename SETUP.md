@@ -328,7 +328,8 @@ HTTPS certificate.
 **Completed Downloads** lists what just finished. With Radarr or Sonarr set
 up, it lists only what they imported, since a download that finished but
 failed to import isn't news. Without them, it uses each client's own record
-of finished jobs, and what the bot saw leave the queue at 100%.
+of finished jobs, and what the bot saw finish in the queue (including fast
+ones that went from half-way to done between two refreshes).
 
 The `downloads` section of `data/config.json` (`max_items`, `max_name_length`,
 and `keywords`, which trims release tags like `1080p` off names) covers every
@@ -345,6 +346,12 @@ password there and logs where it pointed instead. An older config's `sabnzbd` se
 
 By default the stream cards sit under the dashboard. To give them their own
 channel, set `stream_cards.channel_id` in `data/config.json`.
+
+Move the dashboard (`CHANNEL_ID`) or the cards to another channel, or turn the
+separate Completed Downloads message off, and the bot takes the old message
+down on its next start instead of leaving it frozen. (It remembers channels
+from 1.1.2 on, so a move made in the same go as upgrading from an older
+version leaves the old message to delete by hand, once.)
 
 ### Uptime Kuma 2.x
 

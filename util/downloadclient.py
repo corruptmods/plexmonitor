@@ -18,9 +18,14 @@ client at most every ten minutes instead of on every refresh.
 
 A queue item:
   {"id" ("<client name, lowercased>:<its own id>"), "name", "progress"
-   (0-100), "timeleft" ("H:MM:SS" or ""), "size_bytes" (-1 when unknown),
-   "status" ("" while downloading, else a short word or two saying why
-   not), "speed_bps", "category", "client"}
+   (0-100), "timeleft" ("H:MM:SS" or ""), "eta_s" (the same in seconds, or
+   None), "size_bytes" (-1 when unknown), "status" ("" while downloading,
+   else a short word or two saying why not), "speed_bps", "category",
+   "client"}
+
+fetch_queue()'s extras may also list "finished": the ids of jobs the client
+still holds that are done downloading (a torrent seeding). A job that moves
+from the queue into that list finished, however fast it went.
 
 A history item:
   {"name", "category", "size" (text, may be ""), "bytes", "completed"
@@ -74,6 +79,22 @@ def eta_text(seconds: Any) -> str:
     hours, rest = divmod(value, 3600)
     minutes, secs = divmod(rest, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
+def eta_seconds(text: Any) -> Optional[float]:
+    """"H:MM:SS" (hours may pass 24) or "D:HH:MM:SS" -> seconds; None when
+    it isn't a time."""
+    parts = str(text or "").strip().split(":")
+    if not 2 <= len(parts) <= 4 or not all(p.isdigit() for p in parts):
+        return None
+    numbers = [int(p) for p in parts]
+    if len(numbers) == 4:
+        days, hours, minutes, secs = numbers
+        return float(days * 86400 + hours * 3600 + minutes * 60 + secs)
+    total = 0
+    for number_ in numbers:
+        total = total * 60 + number_
+    return float(total)
 
 
 def with_scheme(url: str) -> str:
@@ -180,15 +201,19 @@ class DownloadClient:
         return not self.categories or \
             str(category or "").strip().lower() in self.categories
 
+    def job_id(self, ident: Any) -> str:
+        return f"{self.name.lower()}:{str(ident).lower()}"
+
     def item(self, ident: str, name: Any, progress: float, size_bytes: float,
              status: str = "", timeleft: str = "", speed_bps: float = 0.0,
              category: Any = "") -> Dict[str, Any]:
         size = number(size_bytes, -1)
         return {
-            "id": f"{self.name.lower()}:{str(ident).lower()}",
+            "id": self.job_id(ident),
             "name": str(name or "Unknown"),
             "progress": max(0.0, min(100.0, number(progress))),
             "timeleft": timeleft,
+            "eta_s": eta_seconds(timeleft) if timeleft else None,
             # 0 is what clients report before they know (a magnet still
             # fetching its file list): unknown, not empty.
             "size_bytes": size if size > 0 else -1,
@@ -236,6 +261,7 @@ class DownloadClient:
                           else sum(i["speed_bps"] for i in items)),
             "disk_free": extras.get("disk_free"),
             "disk_total": extras.get("disk_total"),
+            "finished": list(extras.get("finished") or []),
         }
 
     async def history(self, limit: int,
@@ -272,13 +298,16 @@ class TorrentClient(DownloadClient):
         raise NotImplementedError
 
     async def fetch_queue(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        rows = await self._rows()
         items = [self.item(row["id"], row["name"], row["progress"],
                            row["size"], status=row["word"],
                            timeleft="" if row["word"] else eta_text(row["eta"]),
                            speed_bps=row["speed"], category=row["category"])
-                 for row in await self._rows() if row["word"] is not None]
+                 for row in rows if row["word"] is not None]
         items.sort(key=lambda i: (bool(i["status"]), -i["progress"]))
-        return items, {}
+        finished = [self.job_id(row["id"]) for row in rows
+                    if row["word"] is None and self._wanted(row["category"])]
+        return items, {"finished": finished}
 
     async def fetch_history(self, limit: int) -> List[Dict[str, Any]]:
         return [self.history_item(row["name"], row["category"], row["size"],

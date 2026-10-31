@@ -136,7 +136,8 @@ class QbittorrentClient(DownloadClient):
         return [t for t in data or [] if isinstance(t, dict)]
 
     async def fetch_queue(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        torrents = [t for t in await self._torrents() if not finished(t)]
+        everything = await self._torrents()
+        torrents = [t for t in everything if not finished(t)]
         items = []
         for torrent in torrents:
             status = STATE_WORDS.get(str(torrent.get("state") or ""), "")
@@ -150,7 +151,9 @@ class QbittorrentClient(DownloadClient):
                 category=torrent.get("category")))
         # Actually moving first, then furthest along.
         items.sort(key=lambda i: (bool(i["status"]), -i["progress"]))
-        return items, {}
+        done = [self.job_id(t.get("hash") or "") for t in everything
+                if finished(t) and self._wanted(t.get("category"))]
+        return items, {"finished": done}
 
     async def fetch_history(self, limit: int) -> List[Dict[str, Any]]:
         """Torrents that finished downloading. One removed after its import

@@ -27,6 +27,7 @@ public `http_trace` parameter -- no monkey-patching of internals.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -35,6 +36,11 @@ logger = logging.getLogger("plexmonitor.ratelimit")
 # One fully-detailed 429 per this many seconds; the rest are counted
 # and reported as a single summary line when the window rolls over.
 NOISE_WINDOW = 600.0
+# A message edit's route, and the channel it's in (its bucket's key).
+_EDIT_ROUTE = re.compile(r"/channels/(\d+)/messages/\d+")
+# Channels whose edit buckets are remembered at once (the dashboard's,
+# the cards', the request panel's...); the oldest reading goes first.
+MAX_CHANNELS = 32
 
 try:
     import aiohttp
@@ -61,8 +67,11 @@ class RateLimitObserver:
     """Records the rate-limit state Discord reports on every response."""
 
     def __init__(self) -> None:
-        # Most recent state for the dashboard's own route (editing a message).
+        # Most recent state of a message edit's bucket, in any channel, and
+        # per channel. Discord keys the edit bucket by channel, so the cards
+        # channel running dry says nothing about the dashboard's.
         self.last_edit: Optional[Dict[str, Any]] = None
+        self.edits: Dict[str, Dict[str, Any]] = {}
         self.last_429: Optional[Dict[str, Any]] = None
         self.count_429 = 0
         # Log aggregation. A common steady state is a shared-scope
@@ -96,8 +105,7 @@ class RateLimitObserver:
                 # summarised, so the morning grep counts stay meaningful
                 # via the summary line's total.
                 self._noise_suppressed += 1
-                if _channel_edit(method, url):
-                    self.last_edit = info
+                self._record_edit(method, url, info)
                 return
             if self._noise_suppressed:
                 logger.warning(
@@ -133,23 +141,40 @@ class RateLimitObserver:
             except Exception:
                 pass
 
+        self._record_edit(method, url, info)
+
+    def _record_edit(self, method: str, url: str,
+                     info: Dict[str, Any]) -> None:
         # Channel message edits only. An interaction edit (PATCH
         # /webhooks/{app}/{token}/messages/@original) is keyed by the token,
         # a different bucket; recording it here let a page flip's fresh
         # bucket stand in for the channel's and misjudge the next refresh.
-        if _channel_edit(method, url):
-            self.last_edit = info
+        channel = _edit_channel(method, url)
+        if channel is None:
+            return
+        self.last_edit = info
+        self.edits.pop(channel, None)
+        self.edits[channel] = info
+        while len(self.edits) > MAX_CHANNELS:
+            self.edits.pop(next(iter(self.edits)))
+
+    def _edit(self, channel_id: Any = None) -> Optional[Dict[str, Any]]:
+        """The edit bucket's last reading: in that channel, or anywhere."""
+        if channel_id:
+            return self.edits.get(str(channel_id))
+        return self.last_edit
 
     # ------------------------------------------------------------------
-    # Consumers
+    # Consumers. Each takes the channel whose bucket it's about; without
+    # one, the last edit anywhere.
 
-    def edit_wait(self) -> float:
+    def edit_wait(self, channel_id: Any = None) -> float:
         """Seconds to wait before another message edit is safe.
 
         Returns 0 when the bucket has room, or when Discord has told us
         nothing yet.
         """
-        info = self.last_edit
+        info = self._edit(channel_id)
         if not info:
             return 0.0
         remaining = info.get("remaining")
@@ -161,7 +186,7 @@ class RateLimitObserver:
         elapsed = time.monotonic() - info["at"]
         return max(0.0, reset_after - elapsed)
 
-    def edit_headroom(self) -> Optional[int]:
+    def edit_headroom(self, channel_id: Any = None) -> Optional[int]:
         """Requests left in the edit bucket, or None if unknown.
 
         Returns None once the bucket's window has elapsed: the count was
@@ -169,7 +194,7 @@ class RateLimitObserver:
         the stale zero would read as "still empty". That misread charged
         phantom soft limits against perfectly healthy edits.
         """
-        info = self.last_edit
+        info = self._edit(channel_id)
         if not info:
             return None
         reset_after = info.get("reset_after")
@@ -178,7 +203,7 @@ class RateLimitObserver:
                 return None
         return info.get("remaining")
 
-    def edit_bucket_full(self) -> bool:
+    def edit_bucket_full(self, channel_id: Any = None) -> bool:
         """True only when Discord's last word was an UNTOUCHED edit bucket.
 
         Deliberately strict: unknown, stale or partial state all read as
@@ -186,7 +211,7 @@ class RateLimitObserver:
         throttle has outlived its cause, so "no idea" must never look like
         "all clear".
         """
-        info = self.last_edit
+        info = self._edit(channel_id)
         if not info:
             return False
         limit = info.get("limit")
@@ -199,8 +224,8 @@ class RateLimitObserver:
             return True
         return remaining >= limit - 1
 
-    def describe(self) -> str:
-        info = self.last_edit
+    def describe(self, channel_id: Any = None) -> str:
+        info = self._edit(channel_id)
         if not info:
             return "no rate-limit data yet"
         return (
@@ -243,8 +268,12 @@ def make_trace(observer: RateLimitObserver):
     return trace
 
 
-def _channel_edit(method: str, url: str) -> bool:
-    """A channel message edit -- the bucket the dashboard paces itself by.
-    Interaction edits (PATCH /webhooks/.../messages/@original) are keyed by
-    the interaction token: a different bucket entirely."""
-    return method == "PATCH" and "/channels/" in url and "/messages/" in url
+def _edit_channel(method: str, url: str) -> Optional[str]:
+    """The channel of a channel message edit -- the bucket the dashboard
+    paces itself by -- or None for anything else. Interaction edits (PATCH
+    /webhooks/.../messages/@original) are keyed by the interaction token: a
+    different bucket entirely."""
+    if method != "PATCH":
+        return None
+    match = _EDIT_ROUTE.search(url)
+    return match.group(1) if match else None
