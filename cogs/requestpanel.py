@@ -111,7 +111,7 @@ class ReportModal(ui.Modal, title="Report a problem"):
                          placeholder="e.g. Severance", max_length=200)
 
     def __init__(self, requests) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=requestui.FORM_TIMEOUT)
         self.requests = requests
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -128,7 +128,7 @@ class RequestModal(ui.Modal, title="Request a movie or show"):
                          max_length=200)
 
     def __init__(self, requests) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=requestui.FORM_TIMEOUT)
         self.requests = requests
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -146,7 +146,7 @@ class AskModal(ui.Modal, title="Ask the assistant"):
         max_length=500)
 
     def __init__(self, assistant) -> None:
-        super().__init__(timeout=900)
+        super().__init__(timeout=requestui.FORM_TIMEOUT)
         self.assistant = assistant
 
     async def on_submit(self, interaction: discord.Interaction) -> None:

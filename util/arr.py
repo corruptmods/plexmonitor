@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from util import safehttp
+
 logger = logging.getLogger("plexmonitor.arr")
 
 # History event types shared by both apps.
@@ -41,6 +43,8 @@ DEFAULT_TIMEOUT = 12.0
 # Library -> poster map lifetime, and how soon a FAILED fetch is retried.
 POSTER_TTL = 6 * 3600.0
 POSTER_RETRY = 300.0
+# Radarr/Sonarr's whole library, as JSON: tens of megabytes for a big one.
+LIBRARY_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _parse_time(value: Any) -> float:
@@ -180,14 +184,16 @@ class ArrClient:
         path = "/api/v3/movie" if self.kind == "radarr" else "/api/v3/series"
         try:
             session = await self._get_session()
-            async with session.get(self.url + path,
-                                   headers={"X-Api-Key": self.api_key}
-                                   ) as response:
+            async with await safehttp.request(
+                    session, "GET", self.url + path,
+                    headers={"X-Api-Key": self.api_key}) as response:
                 if not response.ok:
                     logger.warning("%s library returned HTTP %s",
                                    self.kind, response.status)
                     return None
-                records = await response.json(content_type=None)
+                # A big library is tens of megabytes.
+                records = await safehttp.read_json(response,
+                                                   LIBRARY_MAX_BYTES)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning("%s library request failed: %s", self.kind, exc)
             return None
@@ -273,15 +279,15 @@ class ArrClient:
 
         try:
             session = await self._get_session()
-            async with session.get(
-                    f"{self.url}/api/v3/history",
+            async with await safehttp.request(
+                    session, "GET", f"{self.url}/api/v3/history",
                     params=params,
                     headers={"X-Api-Key": self.api_key}) as response:
                 if not response.ok:
                     logger.warning("%s history returned HTTP %s",
                                    self.kind, response.status)
                     return []
-                data = await response.json(content_type=None)
+                data = await safehttp.read_json(response)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning("%s history request failed: %s", self.kind, exc)
             return []

@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import re
 import xmlrpc.client
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
-import aiohttp
-
-from util.downloadclient import (DownloadClient, DownloadClientError,
-                                 eta_text, number)
+from util.downloadclient import (DownloadClientError, TorrentClient, number,
+                                 raise_for)
+from util.safehttp import read_text
 
 FIELDS = ["d.hash=", "d.name=", "d.state=", "d.is_open=", "d.is_active=",
           "d.complete=", "d.size_bytes=", "d.left_bytes=", "d.down.rate=",
@@ -53,81 +52,50 @@ def status_word(torrent: Dict[str, Any]) -> Optional[str]:
     return ""
 
 
-class RtorrentClient(DownloadClient):
+class RtorrentClient(TorrentClient):
     name = "rTorrent"
+    basic_auth = True
 
     def __init__(self, url: str, username: str = "", password: str = "",
                  **kwargs: Any) -> None:
-        super().__init__(url, **kwargs)
+        super().__init__(url, username, password, **kwargs)
         if urlsplit(self.url).path in ("", "/"):
             self.url += "/RPC2"
-        self.username = username or ""
-        self.password = password or ""
-
-    def session_auth(self) -> Optional[aiohttp.BasicAuth]:
-        return (aiohttp.BasicAuth(self.username, self.password)
-                if self.username else None)
 
     async def _call(self, method: str, *params: Any) -> Any:
-        session = await self.session()
         body = xmlrpc.client.dumps(tuple(params), method, allow_none=False)
-        async with session.post(self.url, data=body.encode(),
-                                headers={"Content-Type": "text/xml"}) as response:
-            if response.status == 401:
-                raise DownloadClientError(
-                    "it didn't accept the username or password")
-            if not response.ok:
-                raise DownloadClientError(f"HTTP {response.status}")
-            text = await response.text()
+        async with await self.send("POST", self.url, data=body.encode(),
+                                   headers={"Content-Type": "text/xml"}
+                                   ) as response:
+            raise_for(response)
+            text = await read_text(response)
         try:
             result, _method = xmlrpc.client.loads(text, use_builtin_types=True)
         except xmlrpc.client.Fault as fault:
-            raise DownloadClientError(fault.faultString) from None
+            raise DownloadClientError(str(fault.faultString)[:200]) from None
         except Exception as exc:          # not XML-RPC at all
             raise DownloadClientError("not an XML-RPC answer") from exc
         return result[0] if result else None
 
-    async def _torrents(self) -> List[Dict[str, Any]]:
-        rows = await self._call("d.multicall2", "", "main", *FIELDS)
-        torrents = []
-        for row in rows or []:
-            if isinstance(row, list) and len(row) == len(KEYS):
-                torrent = dict(zip(KEYS, row))
-                # ruTorrent keeps labels URL-encoded.
-                torrent["label"] = unquote(str(torrent.get("label") or ""))
-                torrents.append(torrent)
-        return torrents
-
-    async def fetch_queue(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        items = []
-        for torrent in await self._torrents():
-            word = status_word(torrent)
-            if word is None:
+    async def _rows(self) -> List[Dict[str, Any]]:
+        rows = []
+        for row in await self._call("d.multicall2", "", "main", *FIELDS) or []:
+            if not isinstance(row, list) or len(row) != len(KEYS):
                 continue
+            torrent = dict(zip(KEYS, row))
             size = number(torrent.get("size"))
             left = number(torrent.get("left"))
             rate = number(torrent.get("rate"))
-            items.append(self.item(
-                torrent.get("hash") or "", torrent.get("name"),
-                (size - left) / size * 100 if size > 0 else 0.0,
-                size if size > 0 else -1,
-                status=word,
-                timeleft="" if word or rate <= 0 else eta_text(left / rate),
-                speed_bps=rate,
-                category=torrent.get("label")))
-        items.sort(key=lambda i: (bool(i["status"]), -i["progress"]))
-        return items, {}
-
-    async def fetch_history(self, limit: int) -> List[Dict[str, Any]]:
-        done = []
-        for torrent in await self._torrents():
-            if status_word(torrent) is not None:
-                continue
-            done.append({
-                "name": torrent.get("name") or "Unknown",
-                "category": torrent.get("label") or "",
-                "size": "",
-                "bytes": int(number(torrent.get("size"))),
-                "completed": number(torrent.get("finished")),
+            rows.append({
+                "id": torrent.get("hash") or "",
+                "name": torrent.get("name"),
+                "word": status_word(torrent),
+                "progress": (size - left) / size * 100 if size > 0 else 0.0,
+                "size": size,
+                "eta": left / rate if rate > 0 else None,
+                "speed": rate,
+                # ruTorrent keeps labels URL-encoded.
+                "category": unquote(str(torrent.get("label") or "")),
+                "finished": number(torrent.get("finished")),
             })
-        return done
+        return rows

@@ -30,6 +30,8 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+from util import safehttp
+
 logger = logging.getLogger("plexmonitor.kuma")
 
 STATUS_NAMES = {0: "DOWN", 1: "UP", 2: "PENDING", 3: "MAINTENANCE"}
@@ -167,7 +169,7 @@ class KumaClient:
                     "under Settings -> API Keys and set UPTIME_API_KEY."
                 )
             response.raise_for_status()
-            text = await response.text()
+            text = await safehttp.read_text(response)
 
         saw_ratio = False
         for name, labels, value in _parse_prometheus(text):
@@ -207,7 +209,7 @@ class KumaClient:
         url = f"{self.base_url}/api/badge/{self.monitor_id}/uptime/{duration}"
         async with session.get(url) as response:
             response.raise_for_status()
-            svg = await response.text()
+            svg = await safehttp.read_text(response, 1024 * 1024)
 
         if "N/A" in svg:
             return None

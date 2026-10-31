@@ -24,6 +24,10 @@ logger = logging.getLogger("plexmonitor.requestui")
 # recognise the posts by it, so they're never mistaken for its own embeds
 # when they share a channel.
 ANNOUNCE_MARK = "🍿 Now on Plex"
+# How long a popup form, or the buttons on a private reply, keep working.
+# discord.py forgets them afterwards, and a late submit is lost with
+# whatever was typed: an hour covers a slow typist or a phone call.
+FORM_TIMEOUT = 3600
 
 ACCENT = {
     "available": 0x23A55A,

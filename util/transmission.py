@@ -10,13 +10,12 @@ newer).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-import aiohttp
-
-from util.downloadclient import (DownloadClient, DownloadClientError,
-                                 eta_text, number)
+from util.downloadclient import (DownloadClientError, TorrentClient, number,
+                                 raise_for)
+from util.safehttp import read_json
 
 FIELDS = ["hashString", "name", "status", "percentDone", "rateDownload",
           "eta", "sizeWhenDone", "leftUntilDone", "error",
@@ -71,81 +70,54 @@ def rpc_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
-class TransmissionClient(DownloadClient):
+class TransmissionClient(TorrentClient):
     name = "Transmission"
+    basic_auth = True
 
     def __init__(self, url: str, username: str = "", password: str = "",
                  **kwargs: Any) -> None:
-        super().__init__(url, **kwargs)
+        super().__init__(url, username, password, **kwargs)
         self.url = rpc_url(self.url)
-        self.username = username or ""
-        self.password = password or ""
         self._session_id = ""
 
-    def session_auth(self) -> Optional[aiohttp.BasicAuth]:
-        return (aiohttp.BasicAuth(self.username, self.password)
-                if self.username else None)
-
     async def _call(self, method: str, **arguments: Any) -> Dict[str, Any]:
-        session = await self.session()
         for attempt in (1, 2):
             headers = ({"X-Transmission-Session-Id": self._session_id}
                        if self._session_id else {})
-            async with session.post(self.url, headers=headers,
-                                    json={"method": method,
-                                          "arguments": arguments}) as response:
+            async with await self.send("POST", self.url, headers=headers,
+                                       json={"method": method,
+                                             "arguments": arguments}
+                                       ) as response:
                 if response.status == 409 and attempt == 1:
                     self._session_id = response.headers.get(
-                        "X-Transmission-Session-Id", "")
+                        "X-Transmission-Session-Id", "")[:200]
                     continue
-                if response.status == 401:
-                    raise DownloadClientError(
-                        "it didn't accept the username or password")
-                if not response.ok:
-                    raise DownloadClientError(f"HTTP {response.status}")
-                data = await response.json(content_type=None)
+                raise_for(response)
+                data = await read_json(response)
             if not isinstance(data, dict) or data.get("result") != "success":
-                raise DownloadClientError(
-                    str((data or {}).get("result") or "no answer"))
+                raise DownloadClientError(str(
+                    (data.get("result") if isinstance(data, dict) else None)
+                    or "no answer")[:200])
             return data.get("arguments") or {}
         raise DownloadClientError("it kept refusing its own session id")
 
-    async def _torrents(self) -> List[Dict[str, Any]]:
+    async def _rows(self) -> List[Dict[str, Any]]:
         answer = await self._call("torrent-get", fields=FIELDS)
-        return [t for t in answer.get("torrents") or [] if isinstance(t, dict)]
-
-    @staticmethod
-    def _category(torrent: Dict[str, Any]) -> str:
-        labels = torrent.get("labels") or []
-        return str(labels[0]) if labels else ""
-
-    async def fetch_queue(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        items = []
-        for torrent in await self._torrents():
-            word = status_word(torrent)
-            if word is None:
+        rows = []
+        for torrent in answer.get("torrents") or []:
+            if not isinstance(torrent, dict):
                 continue
-            items.append(self.item(
-                torrent.get("hashString") or "", torrent.get("name"),
-                number(torrent.get("percentDone")) * 100,
-                number(torrent.get("sizeWhenDone"), -1),
-                status=word,
-                timeleft="" if word else eta_text(torrent.get("eta")),
-                speed_bps=number(torrent.get("rateDownload")),
-                category=self._category(torrent)))
-        items.sort(key=lambda i: (bool(i["status"]), -i["progress"]))
-        return items, {}
-
-    async def fetch_history(self, limit: int) -> List[Dict[str, Any]]:
-        done = []
-        for torrent in await self._torrents():
-            if status_word(torrent) is not None:
-                continue
-            done.append({
-                "name": torrent.get("name") or "Unknown",
-                "category": self._category(torrent),
-                "size": "",
-                "bytes": int(number(torrent.get("sizeWhenDone"))),
-                "completed": number(torrent.get("doneDate")),
+            labels = torrent.get("labels") or []
+            rows.append({
+                "id": torrent.get("hashString") or "",
+                "name": torrent.get("name"),
+                "word": status_word(torrent),
+                "progress": number(torrent.get("percentDone")) * 100,
+                "size": number(torrent.get("sizeWhenDone"), -1),
+                "eta": torrent.get("eta"),
+                "speed": number(torrent.get("rateDownload")),
+                "category": str(labels[0]) if isinstance(labels, list)
+                and labels else "",
+                "finished": number(torrent.get("doneDate")),
             })
-        return done
+        return rows

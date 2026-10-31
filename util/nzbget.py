@@ -3,12 +3,11 @@ ControlPassword)."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
-
-import aiohttp
+from typing import Any, Dict, List, Tuple
 
 from util.downloadclient import (DownloadClient, DownloadClientError,
-                                 eta_text, number)
+                                 eta_text, number, raise_for)
+from util.safehttp import read_json
 
 MB = 1024 * 1024
 
@@ -35,28 +34,15 @@ QUEUE_WORDS = {
 
 class NzbgetClient(DownloadClient):
     name = "NZBGet"
-
-    def __init__(self, url: str, username: str = "", password: str = "",
-                 **kwargs: Any) -> None:
-        super().__init__(url, **kwargs)
-        self.username = username or ""
-        self.password = password or ""
-
-    def session_auth(self) -> Optional[aiohttp.BasicAuth]:
-        return (aiohttp.BasicAuth(self.username, self.password)
-                if self.username else None)
+    basic_auth = True
 
     async def _call(self, method: str, *params: Any) -> Any:
-        session = await self.session()
-        async with session.post(f"{self.url}/jsonrpc",
-                                json={"method": method, "params": list(params),
-                                      "id": 1}) as response:
-            if response.status == 401:
-                raise DownloadClientError(
-                    "it didn't accept the username or password")
-            if not response.ok:
-                raise DownloadClientError(f"HTTP {response.status}")
-            data = await response.json(content_type=None)
+        async with await self.send("POST", f"{self.url}/jsonrpc",
+                                   json={"method": method,
+                                         "params": list(params),
+                                         "id": 1}) as response:
+            raise_for(response)
+            data = await read_json(response)
         if not isinstance(data, dict):
             raise DownloadClientError("not an NZBGet answer")
         if data.get("error"):
@@ -72,11 +58,14 @@ class NzbgetClient(DownloadClient):
         downloading = [g for g in groups if g.get("Status") == "DOWNLOADING"]
         items = []
         for group in groups:
-            # Repair files NZBGet holds back are only fetched if needed.
-            held = number(group.get("PausedSizeMB"))
+            state = str(group.get("Status") or "")
+            # Repair files NZBGet holds back are only fetched if needed. A
+            # job paused by hand has ALL its files paused: nothing to leave
+            # out, or it would read as fully downloaded.
+            held = 0.0 if state == "PAUSED" else \
+                number(group.get("PausedSizeMB"))
             size = max(0.0, number(group.get("FileSizeMB")) - held) * MB
             left = max(0.0, number(group.get("RemainingSizeMB")) - held) * MB
-            state = str(group.get("Status") or "")
             if state in AFTER_DOWNLOAD:
                 status_word, left = AFTER_DOWNLOAD[state], 0.0
             elif paused_all and state != "PAUSED":
@@ -104,11 +93,8 @@ class NzbgetClient(DownloadClient):
             # A failing script leaves the download itself fine.
             if not (status.startswith("SUCCESS/") or status == "WARNING/SCRIPT"):
                 continue
-            done.append({
-                "name": entry.get("Name") or entry.get("NZBName") or "Unknown",
-                "category": entry.get("Category") or "",
-                "size": "",
-                "bytes": int(number(entry.get("FileSizeMB")) * MB),
-                "completed": number(entry.get("HistoryTime")),
-            })
+            done.append(self.history_item(
+                entry.get("Name") or entry.get("NZBName"),
+                entry.get("Category"), number(entry.get("FileSizeMB")) * MB,
+                entry.get("HistoryTime")))
         return done

@@ -23,6 +23,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
+from util import safehttp
+
 logger = logging.getLogger("plexmonitor.ai")
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -97,11 +99,14 @@ class Provider:
                 self._session = aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT))
         try:
-            async with self._session.post(url, headers=headers,
-                                          json=body) as response:
+            # The key rides in a header aiohttp would carry to another host
+            # on a redirect: safehttp follows same-host ones only.
+            async with await safehttp.request(self._session, "POST", url,
+                                              headers=headers,
+                                              json=body) as response:
                 try:
-                    data = await response.json(content_type=None)
-                except (ValueError, aiohttp.ContentTypeError):
+                    data = await safehttp.read_json(response)
+                except ValueError:
                     data = None
                 if response.status >= 400:
                     detail = ""

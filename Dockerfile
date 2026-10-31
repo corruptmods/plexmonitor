@@ -8,6 +8,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     RUNNING_IN_DOCKER=true
 
+# su-exec: the entrypoint drops to PUID:PGID with it when those are set.
+RUN apk add --no-cache su-exec
+
 # Install dependencies first so this layer is cached across code edits.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

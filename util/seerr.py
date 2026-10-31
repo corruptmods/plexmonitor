@@ -31,6 +31,8 @@ from urllib.parse import quote
 import aiohttp
 from yarl import URL
 
+from util import safehttp
+
 logger = logging.getLogger("plexmonitor.seerr")
 
 DEFAULT_TIMEOUT = 12.0
@@ -286,11 +288,14 @@ class SeerrClient:
             kwargs["timeout"] = aiohttp.ClientTimeout(total=timeout)
         try:
             session = await self._get_session()
-            async with session.request(method, URL(target, encoded=True),
-                                       **kwargs) as response:
+            # The admin key is in a header aiohttp would carry to another
+            # host on a redirect: safehttp follows same-host ones only.
+            async with await safehttp.request(
+                    session, method, URL(target, encoded=True),
+                    **kwargs) as response:
                 try:
-                    data = await response.json(content_type=None)
-                except (ValueError, aiohttp.ContentTypeError):
+                    data = await safehttp.read_json(response)
+                except ValueError:
                     data = None
                 if 200 <= response.status < 300 and response.status != 202:
                     return data

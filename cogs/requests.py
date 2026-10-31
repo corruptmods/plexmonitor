@@ -33,7 +33,7 @@ from discord import app_commands, ui
 from discord.ext import commands, tasks
 
 from util import linkui, requestui
-from util.auth import admin_users, is_admin
+from util.auth import admin_users, is_admin, is_member
 from util.jsonfile import data_dir, read_json, write_json
 from util import seerr as seerrapi
 from util.seerr import SeerrClient, SeerrError
@@ -42,8 +42,12 @@ logger = logging.getLogger("plexmonitor.requests")
 
 AUTOCOMPLETE_TIMEOUT = 2.5
 ANNOUNCED_KEEP = 500
-# Tries per title before an announcement that keeps failing is dropped.
+# Tries per title before an announcement that can't work (the title is gone
+# from Seerr, the channel was deleted) is dropped. Anything else -- Discord
+# or Seerr having a bad few minutes -- is tried again on every poll until
+# the request is too old to be news (max_age_hours), or this many polls.
 MAX_ATTEMPTS = 3
+MAX_RETRIES = 720
 # One pending ask-an-admin link request per person per this many seconds.
 LINK_ASK_GAP = 600.0
 # Between one person's tries at naming their account.
@@ -165,7 +169,7 @@ class IssueModal(ui.Modal):
     def __init__(self, cog: "Requests", media_id: int, kind: str,
                  title: str, radio: bool = True) -> None:
         super().__init__(title=requestui._clip(f"Report: {title}", 45),
-                         timeout=600)
+                         timeout=requestui.FORM_TIMEOUT)
         self.cog = cog
         self.media_id = media_id
         self.kind = kind
@@ -227,7 +231,7 @@ class ReportPick(ui.View):
     is one button."""
 
     def __init__(self, cog: "Requests", picks: List[Dict[str, Any]]) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=requestui.FORM_TIMEOUT)
         self.cog = cog
         self.picks = {str(r["media_id"]): r for r in picks}
         if len(picks) == 1:
@@ -280,6 +284,8 @@ class Requests(commands.Cog):
         self._link_asks: Dict[int, float] = {}
         self._link_tries: Dict[int, float] = {}
         self._users_task = None
+        # (Discord id, kind, tmdb id) of requests being sent right now.
+        self._requesting: set = set()
         # Links made with /link apply even without a data/config.json.
         self._apply_links()
         if not self.seerr.enabled:
@@ -339,6 +345,16 @@ class Requests(commands.Cog):
             logger.debug("remove_dynamic_items failed", exc_info=True)
         await self.seerr.close()
 
+    async def _for_members(self, interaction: discord.Interaction) -> bool:
+        """Members of the home server only (see util/auth.py is_member).
+        Answers the interaction when it says no."""
+        if await is_member(interaction.client, interaction.user,
+                           interaction.guild):
+            return True
+        await interaction.response.send_message(
+            "This is only for members of this bot's server.", ephemeral=True)
+        return False
+
     async def _ready(self, interaction: discord.Interaction) -> bool:
         if not self.seerr.enabled or not self.config.get("enabled", True):
             await interaction.response.send_message(
@@ -371,7 +387,8 @@ class Requests(commands.Cog):
 
     async def issue_autocomplete(self, interaction: discord.Interaction,
                                  current: str):
-        if not self.seerr.enabled:
+        if not self.seerr.enabled or not await is_member(
+                interaction.client, interaction.user, interaction.guild):
             return []
         results = [r for r in await self._search(current)
                    if r.get("on_plex") and r.get("media_id")]
@@ -395,6 +412,8 @@ class Requests(commands.Cog):
         else -- a sentence, a typo, nothing found -- goes to the AI. The
         interaction must not have been answered yet."""
         text = " ".join(title.split())
+        if not await self._for_members(interaction):
+            return
         assistant = self._assistant()
         if not self.seerr.enabled or not self.config.get("enabled", True):
             if assistant is not None:
@@ -441,7 +460,8 @@ class Requests(commands.Cog):
         on Plex and open the issue form for it. Only what is on Plex can be
         reported; something that never arrived is requested instead. The
         interaction must not have been answered yet."""
-        if not await self._ready(interaction):
+        if not await self._ready(interaction) \
+                or not await self._for_members(interaction):
             return
         text = " ".join(title.split())
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -450,6 +470,7 @@ class Requests(commands.Cog):
         except SeerrError as exc:
             await interaction.followup.send(explain(exc), ephemeral=True)
             return
+
         def on_plex(found):
             return [r for r in found
                     if r.get("on_plex") and r.get("media_id")]
@@ -514,7 +535,23 @@ class Requests(commands.Cog):
     async def handle_request(self, interaction: discord.Interaction,
                              kind: str, tmdb_id: int,
                              seasons: Sequence[int]) -> None:
-        """A Request button or season pick, from any message."""
+        """A Request button or season pick, from any message. A second press
+        while the first is still being sent is turned away: Seerr checks
+        for duplicates too late to stop two at once, and would file (and
+        count against the quota) both."""
+        key = (interaction.user.id, kind, int(tmdb_id))
+        if key in self._requesting:
+            await interaction.response.send_message(
+                "Already sending that request…", ephemeral=True)
+            return
+        self._requesting.add(key)
+        try:
+            await self._request(interaction, kind, tmdb_id, seasons)
+        finally:
+            self._requesting.discard(key)
+
+    async def _request(self, interaction: discord.Interaction, kind: str,
+                       tmdb_id: int, seasons: Sequence[int]) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             user = await self.seerr.user_for_discord(interaction.user.id)
@@ -863,6 +900,8 @@ class Requests(commands.Cog):
     async def ask_admin_link(self, interaction: discord.Interaction,
                              name: str) -> None:
         """Someone names their Seerr account; the admins approve or not."""
+        if not await self._for_members(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         requester = interaction.user
         last = self._link_asks.get(requester.id)
@@ -1102,15 +1141,25 @@ class Requests(commands.Cog):
             try:
                 if await self._announce(channel, kind, tmdb_id, batch):
                     posted += 1
-            except Exception:
-                self._failures[key] = self._failures.get(key, 0) + 1
-                if self._failures[key] < MAX_ATTEMPTS:
-                    logger.exception("Announcement for %s failed (attempt "
-                                     "%d/%d)", key, self._failures[key],
-                                     MAX_ATTEMPTS)
+            except Exception as exc:
+                tries = self._failures.get(key, 0) + 1
+                self._failures[key] = tries
+                lasting = isinstance(exc, discord.NotFound) or (
+                    isinstance(exc, SeerrError) and 400 <= exc.status < 500)
+                limit = MAX_ATTEMPTS if lasting else MAX_RETRIES
+                if tries < limit:
+                    if tries == 1:
+                        logger.warning("Announcement for %s failed (%s) -- "
+                                       "trying again next poll", key, exc,
+                                       exc_info=not isinstance(
+                                           exc, (SeerrError,
+                                                 discord.HTTPException)))
+                    elif tries % 30 == 0:
+                        logger.warning("Announcement for %s still failing "
+                                       "(%d tries): %s", key, tries, exc)
                     continue
-                logger.error("Giving up announcing %s after %d attempts",
-                             key, MAX_ATTEMPTS)
+                logger.error("Giving up announcing %s after %d attempts: %s",
+                             key, tries, exc)
             self._failures.pop(key, None)
             self._announced.extend(int(r["id"]) for r in batch)
         if groups or len(self._announced) != len(known):

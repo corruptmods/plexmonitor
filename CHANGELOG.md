@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.1.2
+
+A sturdiness release: a security review and a bug hunt, with lots of small
+fixes. Nothing new to set up.
+
+**Fixed**
+
+- **Download names aren't cut short anymore.** "The Middle" showed as "The
+  Mid" and "Godless" as "Go", because a tag like `DL` was matched inside words.
+  Tags now only count as whole words after the year or episode number.
+- **A client that's down says so.** Downloading shows "Can't reach qBittorrent"
+  instead of "Queue is empty", the assistant doesn't claim nothing is
+  downloading, and your other clients keep being tracked in the meantime.
+- **Pressing Request twice quickly** files one request, not two.
+- **"Now on Plex" posts aren't lost** when Discord or Seerr has a bad few
+  minutes. The bot keeps trying until the post goes through.
+- **The dashboard's images stop flickering** after a day of uptime.
+- **Stream cards sharing the dashboard's channel** no longer delete the
+  dashboard on restart.
+- **Popup forms stay open for an hour**, so a slow reply isn't lost.
+- **qBittorrent:** a finished torrent being re-checked stays out of
+  Downloading. A wrong password is retried once an hour instead of every
+  refresh, so qBittorrent won't ban the address Sonarr and Radarr use too.
+- **Deluge:** a torrent with an error no longer shows 100%, and the bot
+  reconnects by itself when Deluge's daemon restarts.
+- **NZBGet:** a job you paused no longer shows 100%.
+- **SABnzbd:** Force-priority jobs that keep going in a paused queue show as
+  downloading.
+- Magnets still fetching their file list no longer show "0.00 MB",
+  `DOWNLOAD_VERIFY_SSL` also takes `0`, `no` and `off`, and an address without
+  `http://` works.
+
+**Security**
+
+- **The webhook port can't be used to knock the bot offline.** Quiet
+  connections are now closed after a few seconds. Before, anyone on your
+  network could hold enough open to cut the bot off from Discord.
+- **Passwords and API keys never follow a redirect to another server.** If a
+  download client, Seerr, Radarr/Sonarr or the AI service points somewhere
+  else, the bot stops and logs where.
+- **Oversized replies are refused**, so a misbehaving service can't run the
+  bot out of memory.
+- **Download names show as plain text.** Anyone can name a torrent, so a name
+  can't turn into a link or formatting on the dashboard, and the assistant
+  treats names as data.
+- **Members only, everywhere.** `/recap`, search-as-you-type, the request
+  panel and link requests now check that the person is in your server, like
+  the assistant already did.
+- **Logs:** secrets are blanked in every log line, including from the
+  libraries the bot uses, and in more forms (URL-encoded, basic auth).
+- **Run the bot as a regular user** by setting `PUID` and `PGID` in `.env`
+  (see SETUP). Leave them blank and it runs as root like before.
+
+Rebuild (or pull the new image) and you're done.
+
 ## 1.1.1
 
 A small one that makes the "Now on Plex" posts look a lot better. 🍿

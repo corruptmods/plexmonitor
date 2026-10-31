@@ -135,7 +135,8 @@ class AccountModal(ui.Modal, title="Which Seerr account is yours?"):
                            placeholder="As it shows in Seerr")
 
     def __init__(self, cog) -> None:
-        super().__init__(timeout=600)
+        from util.requestui import FORM_TIMEOUT
+        super().__init__(timeout=FORM_TIMEOUT)
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction) -> None:

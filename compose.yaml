@@ -24,6 +24,9 @@ services:
     stop_grace_period: 20s
     env_file:
       - .env
+    # Nothing in the container can gain privileges it didn't start with.
+    security_opt:
+      - no-new-privileges:true
     environment:
       - RUNNING_IN_DOCKER=true
       - TZ=${TZ:-Etc/UTC}
@@ -35,7 +38,8 @@ services:
     ports:
       # Realtime refresh: Tautulli's Webhook notification agent POSTs here
       # on playback start/stop/pause/resume. Meant for your LAN only: to
-      # publish it on one address, use e.g. "192.168.1.10:8322:8322".
+      # publish it on one address, use e.g. "192.168.1.10:8322:8322". Not
+      # using the webhook? Remove this ports: section.
       - "8322:8322"
     logging:
       driver: json-file

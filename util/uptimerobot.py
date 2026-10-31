@@ -26,6 +26,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
+from util import safehttp
+
 logger = logging.getLogger("plexmonitor.uptimerobot")
 
 API_URL = "https://api.uptimerobot.com/v2/getMonitors"
@@ -82,11 +84,14 @@ class UptimeRobotClient:
         if self.monitor_id:
             payload["monitors"] = self.monitor_id
         session = await self._get_session()
-        async with session.post(API_URL, data=payload) as response:
+        # The API key is in the form: safehttp re-sends it on a redirect
+        # only within UptimeRobot's own host.
+        async with await safehttp.request(session, "POST", API_URL,
+                                          data=payload) as response:
             response.raise_for_status()
             # The API answers 200 with stat=fail on bad input, so the HTTP
             # status alone is not enough to know the call worked.
-            return await response.json(content_type=None)
+            return await safehttp.read_json(response)
 
     @staticmethod
     def _ratios(monitor: Dict[str, Any]) -> Tuple[Optional[float], ...]:

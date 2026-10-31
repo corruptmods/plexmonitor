@@ -51,8 +51,40 @@ SECRET_SETTINGS = (
     "UPTIME_API_KEY", "UPTIME_PASSWORD", "UPTIMEROBOT_API_KEY",
     "RADARR_API_KEY", "SONARR_API_KEY", "SEERR_API_KEY", "AI_API_KEY",
 )
+# Logins sent as HTTP basic auth: (username setting, password setting).
+BASIC_LOGINS = (
+    ("NZBGET_USERNAME", "NZBGET_PASSWORD"),
+    ("QBITTORRENT_USERNAME", "QBITTORRENT_PASSWORD"),
+    ("TRANSMISSION_USERNAME", "TRANSMISSION_PASSWORD"),
+    ("RTORRENT_USERNAME", "RTORRENT_PASSWORD"),
+    ("UPTIME_USERNAME", "UPTIME_PASSWORD"),
+)
+# key=value in a URL or a form, and "key": value in JSON or a header.
 _SECRET_PARAM = re.compile(
-    r"(?i)\b(apikey|api_key|x-plex-token|token|key|password)=([^&\s'\"]+)")
+    r"(?i)\b(apikey|api_key|x-plex-token|access_token|token|key|password)"
+    r"=([^&\s'\"]+)")
+_SECRET_FIELD = re.compile(
+    r"(?i)([\"']?\b(?:apikey|api_key|api-key|x-api-key|x-plex-token|"
+    r"access_token|password)[\"']?\s*:\s*[\"']?)([^\s'\",}]+)")
+
+
+def secret_forms() -> list:
+    """Every secret setting as it could appear in a log line: as is,
+    URL-encoded, and inside a basic-auth header."""
+    import base64
+    from urllib.parse import quote
+    forms = set()
+    for name in SECRET_SETTINGS:
+        value = os.getenv(name, "").strip()
+        # Very short values would blank ordinary words all over the log.
+        if len(value) >= 4:
+            forms.update({value, quote(value, safe="")})
+    for user, password in BASIC_LOGINS:
+        user, password = os.getenv(user, ""), os.getenv(password, "")
+        if user and password:
+            forms.add(base64.b64encode(
+                f"{user}:{password}".encode()).decode())
+    return sorted(forms, key=len, reverse=True)
 
 
 class RedactingFormatter(logging.Formatter):
@@ -60,35 +92,37 @@ class RedactingFormatter(logging.Formatter):
 
     def __init__(self, fmt: str) -> None:
         super().__init__(fmt)
-        self.secrets = sorted(
-            {value for value in (os.getenv(name, "").strip()
-                                 for name in SECRET_SETTINGS)
-             if len(value) >= 6}, key=len, reverse=True)
+        self.secrets = secret_forms()
 
     def format(self, record: logging.LogRecord) -> str:
         text = super().format(record)
         for secret in self.secrets:
             text = text.replace(secret, "***")
-        return _SECRET_PARAM.sub(r"\1=***", text)
+        text = _SECRET_PARAM.sub(r"\1=***", text)
+        return _SECRET_FIELD.sub(r"\1***", text)
 
 
 formatter = RedactingFormatter(
     "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
+# One handler, on the root logger, so everything that logs -- this bot,
+# discord.py, and the libraries under them (asyncio, aiohttp) -- goes
+# through the redactor. The bot's own lines from LOG_LEVEL up, everyone
+# else's warnings and errors.
+console = logging.StreamHandler(sys.stdout)
+console.setFormatter(formatter)
+logging.getLogger().addHandler(console)
+logging.getLogger().setLevel(logging.WARNING)
+
 bot_logger = logging.getLogger("plexmonitor")
 bot_logger.setLevel(LOG_LEVEL)
 
-console = logging.StreamHandler(sys.stdout)
-console.setFormatter(formatter)
-bot_logger.addHandler(console)
-
 # discord.py logs through its own "discord" logger -- and that includes
 # exceptions raised inside view/button callbacks and gateway problems.
-# Without a handler here those vanish silently, which once made a dead
-# pager button look like nothing happened at all.
+# Without a handler those vanish silently, which once made a dead pager
+# button look like nothing happened at all.
 discord_logger = logging.getLogger("discord")
 discord_logger.setLevel(logging.WARNING)
-discord_logger.addHandler(console)
 
 
 class _DropRateLimitChatter(logging.Filter):
@@ -114,7 +148,7 @@ if not RUNNING_IN_DOCKER:
         when="midnight", interval=1, backupCount=7, encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
-    bot_logger.addHandler(file_handler)
+    logging.getLogger().addHandler(file_handler)
 
 # --------------------------------------------------------------------- bot
 
@@ -229,10 +263,26 @@ async def is_authorized(interaction: discord.Interaction) -> bool:
     return await is_admin(bot, interaction.user)
 
 
+def cog_names() -> list:
+    """The cogs that can be loaded: files in cogs/, less retired ones."""
+    return [f[:-3] for f in sorted(os.listdir(COGS_DIR))
+            if f.endswith(".py") and not f.startswith("__")
+            and f[:-3] not in RETIRED_COGS]
+
+
 async def _manage(interaction: discord.Interaction, cog: str, action: str) -> None:
     await interaction.response.defer(ephemeral=True)
     if not await is_authorized(interaction):
         await interaction.followup.send("You are not authorized to run this command.")
+        return
+    cog = cog.strip().removesuffix(".py")
+    if cog in RETIRED_COGS:
+        await interaction.followup.send(
+            f"`{cog}` was replaced by `{RETIRED_COGS[cog]}`.")
+        return
+    if cog not in cog_names():
+        await interaction.followup.send(
+            "No cog by that name. `/cogs` lists them.")
         return
     handler = {
         "load": bot.load_extension,
@@ -269,8 +319,7 @@ async def list_cogs(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
             "You are not authorized to run this command.", ephemeral=True)
         return
-    available = [f[:-3] for f in sorted(os.listdir(COGS_DIR))
-                 if f.endswith(".py") and not f.startswith("__")]
+    available = cog_names()
     loaded = {ext.split(".")[-1] for ext in bot.extensions}
     embed = discord.Embed(title="Cogs", colour=0x5865F2)
     for cog in available:

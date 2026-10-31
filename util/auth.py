@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
 
 import discord
 
 logger = logging.getLogger("plexmonitor.auth")
+
+# How long a "member or not" answer is trusted before asking Discord again.
+MEMBER_TTL = 600.0
+# user id -> (member, when it was checked)
+_members: Dict[int, Tuple[bool, float]] = {}
 
 
 def authorized_ids() -> List[int]:
@@ -85,3 +91,33 @@ async def home_member(client: discord.Client,
         logger.info("Could not check whether %s is in %s: %s", user_id,
                     guild, exc)
         return None
+
+
+async def is_member(client: discord.Client, user: discord.abc.User,
+                    guild: Optional[discord.Guild] = None) -> bool:
+    """Whether someone may use what's for the home server's people: the
+    assistant, Seerr searches, link requests. A bot can be DMed, or added
+    to other servers, by anyone; answers spend the AI key, searches use the
+    Seerr admin key, and both can say who is watching what.
+
+    `guild` is where they asked from; inside the home server they're a
+    member without any lookup. When Discord can't say (the server isn't
+    loaded yet right after a reconnect), they're let in rather than
+    refusing everyone."""
+    home = home_guild(client)
+    if home is None:
+        return True
+    if guild is not None and guild.id == home.id:
+        return True
+    now = time.monotonic()
+    seen = _members.get(user.id)
+    if seen is not None and now - seen[1] < MEMBER_TTL:
+        return seen[0]
+    allowed = await home_member(client, user.id)
+    if allowed is None:
+        return True
+    if len(_members) > 10000:
+        for uid in [u for u, v in _members.items() if now - v[1] >= MEMBER_TTL]:
+            _members.pop(uid, None)
+    _members[user.id] = (allowed, now)
+    return allowed

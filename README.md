@@ -121,6 +121,8 @@ services:
     stop_grace_period: 20s
     env_file:
       - .env
+    security_opt:
+      - no-new-privileges:true
     environment:
       - TZ=${TZ:-Etc/UTC}
     volumes:
@@ -137,15 +139,16 @@ on one release.
 
 | Command | Who | What it does |
 |---|---|---|
-| `/issue` | Everyone | Report a problem with something on Plex to Seerr |
-| `/recap` | Everyone | Spoiler-free recap of a show up to where you are (Seerr AI) |
+| `/issue` | Members | Report a problem with something on Plex to Seerr |
+| `/recap` | Members | Spoiler-free recap of a show up to where you are (Seerr AI) |
 | `/link`, `/unlink` | Bot admins | Link someone's Discord account to their Seerr account |
 | `/emojis`, `/statusdots` | Everyone | List this server's emoji with the tags to paste into `data/config.json` (only the person who ran it sees the list) |
 | `/load`, `/unload`, `/reload`, `/cogs` | Bot admins | Manage the bot's modules without a restart |
 
 Requesting and the assistant are buttons on the request panel, so there is no
-request command. "Bot admins" are the user IDs in `DISCORD_AUTHORIZED_USERS`,
-or the bot's owner when that's empty.
+request command. "Members" are the people in the server the dashboard
+(`CHANNEL_ID`) is in. "Bot admins" are the user IDs in
+`DISCORD_AUTHORIZED_USERS`, or the bot's owner when that's empty.
 
 ## Credits
 

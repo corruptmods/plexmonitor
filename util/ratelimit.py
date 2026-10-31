@@ -61,7 +61,6 @@ class RateLimitObserver:
     """Records the rate-limit state Discord reports on every response."""
 
     def __init__(self) -> None:
-        self.buckets: Dict[str, Dict[str, Any]] = {}
         # Most recent state for the dashboard's own route (editing a message).
         self.last_edit: Optional[Dict[str, Any]] = None
         self.last_429: Optional[Dict[str, Any]] = None
@@ -86,9 +85,6 @@ class RateLimitObserver:
             "status": status,
             "at": time.monotonic(),
         }
-        if info["bucket"]:
-            self.buckets[info["bucket"]] = info
-
         if status == 429:
             self.count_429 += 1
             self.last_429 = info

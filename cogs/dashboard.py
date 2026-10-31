@@ -53,13 +53,14 @@ from util.uptimerobot import UptimeRobotClient
 from util.kuma_history import SOCKETIO_AVAILABLE, KumaHistoryClient
 from util.progress import ProgressBar
 from util.state import ServerStateTracker
-from util.tautulli import TautulliClient, TautulliError
+from util.aipager import walk
+from util.tautulli import TautulliClient, TautulliError, pretty_resolution
 
 logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.1.1"
+BUILD = "v1.1.2"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -71,6 +72,17 @@ PRESENCE_MIN_GAP = 15.0
 OWN_ID_PREFIXES = ("plex-monitor:",)
 
 
+def md(text: Any) -> str:
+    """Text from outside (a release name, a category) shown as itself, not
+    as markdown: anyone can name a torrent "[Dune](http://...)"."""
+    return discord.utils.escape_markdown(str(text))
+
+
+def in_code(text: Any) -> str:
+    """Text placed inside a code block, which a backtick would close."""
+    return str(text).replace("`", "\u02cb")
+
+
 def not_ours(message) -> bool:
     """True when a message isn't one of the dashboard's own: it carries a
     button or menu the dashboard didn't mint, or it's a "Now on Plex" post
@@ -79,13 +91,6 @@ def not_ours(message) -> bool:
         author = getattr(getattr(embed, "author", None), "name", None)
         if author == ANNOUNCE_MARK:
             return True
-    def walk(items):
-        for item in items or []:
-            yield item
-            yield from walk(getattr(item, "children", None))
-            accessory = getattr(item, "accessory", None)
-            if accessory is not None:
-                yield accessory
     for component in walk(getattr(message, "components", None)):
         custom_id = getattr(component, "custom_id", None)
         if isinstance(custom_id, str) and custom_id \
@@ -1430,10 +1435,18 @@ class Dashboard(commands.Cog):
                                "missing) -- realtime refresh disabled")
             return
         try:
-            app = web.Application()
+            # Tautulli's pokes are tiny and the body is never read.
+            app = web.Application(client_max_size=64 * 1024)
             app.router.add_post("/webhook", self._handle_webhook)
             app.router.add_post("/webhook/{secret}", self._handle_webhook)
-            self._web_runner = web.AppRunner(app, access_log=None)
+            # Connections that sit idle, or never finish their headers, are
+            # closed after a few seconds. aiohttp's default keeps them for
+            # an hour, so anyone on the network could hold enough open to
+            # use up the bot's file handles -- and with them its connection
+            # to Discord. A secret doesn't help: it's checked only once a
+            # whole request has arrived.
+            self._web_runner = web.AppRunner(app, access_log=None,
+                                             keepalive_timeout=5)
             await self._web_runner.setup()
             site = web.TCPSite(self._web_runner, "0.0.0.0",
                                self.webhook["port"])
@@ -1802,21 +1815,17 @@ class Dashboard(commands.Cog):
             return []
 
     async def _fetch_uptime(self) -> Dict[str, Any]:
-        if self.uptimerobot:
-            now = datetime.now(timezone.utc)
-            if (self._kuma_cache_at
-                    and (now - self._kuma_cache_at).total_seconds()
-                    < self._kuma_interval):
-                return self._kuma_cache
-            self._kuma_cache = await self.uptimerobot.fetch()
-            self._kuma_cache_at = now
-            return self._kuma_cache
-        if not self.kuma:
+        """UptimeRobot when it's set up, else Uptime Kuma; cached for the
+        monitor's own interval either way."""
+        source = self.uptimerobot or self.kuma
+        if not source:
             return {}
         now = datetime.now(timezone.utc)
-        if self._kuma_cache_at and (now - self._kuma_cache_at).total_seconds() < self._kuma_interval:
+        if (self._kuma_cache_at
+                and (now - self._kuma_cache_at).total_seconds()
+                < self._kuma_interval):
             return self._kuma_cache
-        self._kuma_cache = await self.kuma.fetch()
+        self._kuma_cache = await source.fetch()
         self._kuma_cache_at = now
         return self._kuma_cache
 
@@ -1989,15 +1998,7 @@ class Dashboard(commands.Cog):
         """Append a slim spacer line to a section's last content."""
         return f"{value}\n\u200b" if self.section_gap else value
 
-    @staticmethod
-    def _pretty_resolution(value: str) -> str:
-        """Tautulli reports "4k"/"sd" lowercase; everything else is fine as-is."""
-        lowered = value.strip().lower()
-        if lowered in ("4k", "2160", "2160p"):
-            return "4K"
-        if lowered == "sd":
-            return "SD"
-        return value
+    _pretty_resolution = staticmethod(pretty_resolution)
 
     def _card_budget(self) -> float:
         """Pixel width every non-bar line in a card must stay under.
@@ -2641,13 +2642,16 @@ class Dashboard(commands.Cog):
         bar = self.bar.render(percent, show_percent=False, inline=not boxed)
         pct = f"{int(max(0.0, min(100.0, percent))) if percent < 100 else 100}%"
         head = f"{bar} · {pct}"
-        name = self._truncate(name)
+        name = md(self._truncate(name))
         if boxed:
-            return f"**{name}**\n```{chr(10).join([head] + self._pack(detail, self.wide_width))}```"
+            packed = in_code(chr(10).join(
+                [head] + self._pack(detail, self.wide_width)))
+            return f"**{name}**\n```{packed}```"
         detail_lines = self._pack(detail, self.wide_width - 2)
         lines = [f"├ {head}"]
         for index, line in enumerate(detail_lines):
-            lines.append(f"{'└' if index == len(detail_lines) - 1 else '├'} {line}")
+            lines.append(f"{'└' if index == len(detail_lines) - 1 else '├'} "
+                         f"{md(line)}")
         return f"**{name}**\n" + "\n".join(lines)
 
     @classmethod
@@ -3087,10 +3091,14 @@ class Dashboard(commands.Cog):
         # --- downloads (queue speed folded in as the last line) ---
         if self.panels["downloads"] and self._downloads_enabled():
             queue = downloads.get("downloads") or []
+            unreachable = ", ".join(downloads.get("unreachable") or [])
             if queue:
                 total_queued = downloads.get("queued_total") or len(queue)
                 body = self._join_within_limit([self._download_line(d) for d in queue])
                 tail: List[str] = []
+                if unreachable:
+                    # Without this the count reads as complete.
+                    tail.append(f"can't reach {unreachable}")
                 if self.panels["queue_speed"] and downloads.get("speed"):
                     tail.append(f"{self._emoji('queue_speed')} `{downloads['speed']}` total".strip())
                 if self.panels["total_space"] and downloads.get("diskspacetotal1"):
@@ -3109,6 +3117,12 @@ class Dashboard(commands.Cog):
                     + (f" (showing {len(queue)})" if total_queued > len(queue)
                        else ""),
                     self._gap(body))
+            elif unreachable:
+                # Not "Queue is empty": nobody knows that right now.
+                self._titled_field(
+                    embed, "downloading", "Downloading",
+                    self._gap(f"{self._emoji('offline')} *Can't reach "
+                              f"{unreachable}*".strip()))
             else:
                 self._titled_field(
                     embed, "downloading", "Downloading",
@@ -4187,11 +4201,8 @@ class Dashboard(commands.Cog):
                     # ones would change their embed url next tick and
                     # reintroduce the flicker this is here to stop. The old
                     # signature stays valid until it expires.
-                    sent = {f.filename for f in files}
-                    for a in message.attachments:
-                        if a.filename in sent or a.filename not in self._attachment_urls:
-                            self._attachment_urls[a.filename] = a.url
-                            self._attachment_pinned[a.filename] = time.monotonic()
+                    self._pin_attachments(message.attachments,
+                                          {f.filename for f in files})
                     self._last_push_had_files = bool(files)
                     self._file_keys = dict(self._pending_keys)
                     self._rendered_layout = self._pending_layout
@@ -4349,30 +4360,32 @@ class Dashboard(commands.Cog):
         logger.info("Created dashboard message %s", message.id)
         return True
 
-    async def _sweep_duplicates(self, channel) -> None:
-        """Delete stray dashboard messages left behind by failed reposts.
+    async def _sweep(self, channel, what: str) -> None:
+        """Delete this bot's stray dashboard messages in a channel: left
+        behind by a repost whose delete failed, a restart landing between
+        post and delete, or a cards message whose create half-failed.
 
-        A repost posts the new message before deleting the old one, so a
-        delete that fails (or a restart landing between the two) strands a
-        duplicate. Only this bot's own embed messages in the dashboard
-        channel are considered, and never the one currently tracked.
-        """
+        Only the bot's own embed messages, never one it tracks (dashboard,
+        completed downloads, cards -- any two can share a channel), and
+        never someone else's ("Now on Plex" posts, the request panel, a
+        bot sharing the token: see not_ours)."""
+        tracked = {self.dashboard_message_id, self.recent_message_id,
+                   self.cards_message_id}
         try:
             async for old in channel.history(limit=30):
-                if old.author.id != self.bot.user.id:
-                    continue
-                if old.id in (self.dashboard_message_id,
-                              self.recent_message_id,
-                              self.cards_message_id):
+                if old.author.id != self.bot.user.id or old.id in tracked:
                     continue
                 if not old.embeds or not_ours(old):
                     continue
                 await old.delete()
-                logger.info("Swept stray dashboard message %s", old.id)
+                logger.info("Swept stray %s message %s", what, old.id)
         except discord.HTTPException as exc:
-            logger.warning("Could not sweep old dashboard messages: %s", exc)
+            logger.warning("Could not sweep old %s messages: %s", what, exc)
         except Exception:
-            logger.exception("Duplicate sweep failed")
+            logger.exception("Sweeping %s messages failed", what)
+
+    async def _sweep_duplicates(self, channel) -> None:
+        await self._sweep(channel, "dashboard")
 
     async def _replace_message(self, channel, old_message) -> None:
         """Retire the dashboard message and post a fresh replacement.
@@ -4606,10 +4619,11 @@ class Dashboard(commands.Cog):
                 editor = None
             try:
                 embeds, files, view = await self._compose(use_cache=True)
+                drawn = self._page_rendered
                 _m, _mf, card_e, card_f = self._split_surfaces(embeds, files)
                 if await self._push_cards(cards_channel, card_e, card_f,
                                           view, editor=editor):
-                    self._rendered_page = self._card_page
+                    self._rendered_page = drawn
                     self._cards_payload = None
             except Exception:
                 logger.exception(
@@ -4654,16 +4668,17 @@ class Dashboard(commands.Cog):
 
         try:
             embeds, files, view = await self._compose(use_cache=True)
+            drawn = self._page_rendered
             if message is None:
                 # No live message to edit: replace outright (full upload).
                 await self._replace_message(channel, None)
-                self._rendered_page = self._card_page
+                self._rendered_page = drawn
             elif await self._push(channel, message, embeds, files, view,
                                   editor=editor):
                 # Only a delivered edit moves the displayed page. If this
                 # failed, _rendered_page stays behind and the next press is
                 # treated as a retry rather than swallowed.
-                self._rendered_page = self._card_page
+                self._rendered_page = drawn
         except Exception:
             logger.exception(
                 "Page flip failed -- page %d renders on the next refresh",
@@ -4864,25 +4879,9 @@ class Dashboard(commands.Cog):
                 card_embeds, cards_files or None)
 
     async def _sweep_cards(self, channel) -> None:
-        """Delete strays in the cards channel, once per process.
-
-        The bot owns this channel, so anything it posted that is not the
-        current cards message is a leftover from a failed create.
-        """
+        """Strays in the cards channel, once per process."""
         self._cards_swept = True
-        try:
-            async for message in channel.history(limit=30):
-                # Only the bot's own embed messages: stream cards are
-                # embeds, while "Now on Plex" posts and other component
-                # messages (if they share this channel) are not.
-                if (message.author.id == self.bot.user.id
-                        and message.id != self.cards_message_id
-                        and message.embeds
-                        and not not_ours(message)):
-                    await message.delete()
-                    logger.info("Deleted stray cards message %s", message.id)
-        except Exception as exc:
-            logger.warning("Could not sweep the cards channel: %s", exc)
+        await self._sweep(channel, "cards")
 
     COMPLETION_PROGRESS = 98.0
 
@@ -4989,6 +4988,10 @@ class Dashboard(commands.Cog):
         slots = (downloads or {}).get("slots")
         if slots is None:
             return                       # queue unreadable; assume nothing
+        # Ids are "<client>:<its id>". A client that couldn't be read this
+        # time says nothing about its jobs: they stay as last seen.
+        unread = {str(n).lower() for n in
+                  (downloads or {}).get("unreachable") or []}
         current = {}
         for slot in slots:
             key = str(slot.get("id") or "")
@@ -4997,7 +5000,7 @@ class Dashboard(commands.Cog):
 
         changed = False
         for key, last in list(self._queue_seen.items()):
-            if key in current:
+            if key in current or key.split(":", 1)[0] in unread:
                 continue
             self._queue_seen.pop(key, None)
             if float(last.get("progress") or 0) < self.COMPLETION_PROGRESS:
@@ -5142,22 +5145,26 @@ class Dashboard(commands.Cog):
                 .strip())
             return embed, signature
 
-        lines = []
-        for item in done:
-            name = item.get("display") or item["name"]
-            bits = []
-            if item.get("size"):
-                bits.append(f"`{item['size']}`")
-            if item.get("completed"):
-                bits.append(discord_timestamp(
-                    datetime.fromtimestamp(item["completed"], tz=timezone.utc),
-                    "R"))
-            if item.get("category"):
-                bits.append(str(item["category"]))
-            lines.append(f"**{self._truncate(name)}**\n-# "
-                         + " · ".join(bits))
-        embed.description = "\n".join(lines)[:4000]
+        embed.description = "\n".join(
+            self._recent_entry(item, with_category=True) for item in done
+        )[:4000]
         return embed, signature
+
+    def _recent_entry(self, item: Dict[str, Any],
+                      with_category: bool = False) -> str:
+        """A finished download as two lines: its name, then size, age and
+        (on the separate message) its category."""
+        bits = []
+        if item.get("size"):
+            bits.append(f"`{in_code(item['size'])}`")
+        if item.get("completed"):
+            bits.append(discord_timestamp(
+                datetime.fromtimestamp(item["completed"], tz=timezone.utc),
+                "R"))
+        if with_category and item.get("category"):
+            bits.append(md(item["category"]))
+        name = item.get("display") or item.get("name") or "Unknown"
+        return f"**{md(self._truncate(name))}**\n-# " + " · ".join(bits)
 
     def _emit_recent_field(self, embed) -> None:
         """Finished downloads, as one block directly under Downloading.
@@ -5214,8 +5221,8 @@ class Dashboard(commands.Cog):
                                      size=textwidth.SUBTEXT_PX)
                 name = self._fit_release(str(item["display"]),
                                          max(60.0, room - spent))
-                lines.append(f"-# **{name}**"
-                             + (f" · {tail}" if tail else ""))
+                lines.append(f"-# **{md(name)}**"
+                             + (f" · {md(tail)}" if tail else ""))
             body = "\n".join(lines)
         elif done and self.recent_boxed:
             # One fenced block, columns aligned, matching the boxed values
@@ -5243,22 +5250,11 @@ class Dashboard(commands.Cog):
             rows = [(self._truncate_release(name, name_col), size, age)
                     for name, size, age in rows]
             name_col = max((len(r[0]) for r in rows), default=0)
-            body = "```" + "\n".join(
+            body = "```" + in_code("\n".join(
                 f"{name:<{name_col}}  {size:>{size_col}}  {age:>{age_col}}"
-                .rstrip() for name, size, age in rows) + "```"
+                .rstrip() for name, size, age in rows)) + "```"
         elif done:
-            lines = []
-            for item in done:
-                bits = []
-                if item.get("size"):
-                    bits.append(f"`{item['size']}`")
-                if item.get("completed"):
-                    bits.append(discord_timestamp(
-                        datetime.fromtimestamp(item["completed"],
-                                               tz=timezone.utc), "R"))
-                lines.append(f"**{self._truncate(item['display'])}**\n-# "
-                             + " · ".join(bits))
-            body = "\n".join(lines)
+            body = "\n".join(self._recent_entry(item) for item in done)
         else:
             body = (f"{self._emoji('idle')} "
                     f"*{note or 'Nothing finished recently'}*").strip()
@@ -5482,12 +5478,8 @@ class Dashboard(commands.Cog):
                     message = await asyncio.wait_for(do_edit(
                         embeds=embeds, attachments=keep + files, view=view),
                         timeout=EDIT_TIMEOUT)
-                    sent = {f.filename for f in files}
-                    for a in message.attachments:
-                        if (a.filename in sent
-                                or a.filename not in self._attachment_urls):
-                            self._attachment_urls[a.filename] = a.url
-                            self._attachment_pinned[a.filename] = time.monotonic()
+                    self._pin_attachments(message.attachments,
+                                          {f.filename for f in files})
         except asyncio.TimeoutError:
             logger.warning("Cards edit timed out after %.0fs", EDIT_TIMEOUT)
             return False
@@ -5508,9 +5500,11 @@ class Dashboard(commands.Cog):
         """
         if not self.cards_channel_id or not self.cards_message_id:
             return
+        shown = [name for _t, _k, name in self._refs]
         if any(n.startswith(("p_", "anchor", "bar"))
-               for n in self._attachment_urls):
-            return                      # already pinned this process
+               for n in self._attachment_urls) \
+                and not self._pins_expiring(shown):
+            return                      # pinned, and not due a fresh url
         channel = self.bot.get_channel(self.cards_channel_id)
         if channel is None:
             return
@@ -5527,10 +5521,34 @@ class Dashboard(commands.Cog):
             self._attachment_urls[attachment.filename] = attachment.url
             self._attachment_pinned[attachment.filename] = stamped
             adopted += 1
+        self._pin_attachments([a for a in message.attachments
+                               if a.filename in shown])
         if adopted:
             self._adopted_at = stamped
             logger.info("Adopted %d card attachment(s) -- no poster "
                         "re-upload on this restart", adopted)
+
+    def _pin_attachments(self, attachments, uploaded=()) -> None:
+        """Remember the urls Discord gives a message's files (see THE POSTER
+        FLICKER in _compose). A file just uploaded, one not pinned yet, or
+        one whose pin is about to expire takes the url it has now; any other
+        keeps its pin, so its embed url doesn't change and the client
+        doesn't reload it."""
+        now = time.monotonic()
+        for attachment in attachments:
+            name = attachment.filename
+            stale = (now - self._attachment_pinned.get(name, float("-inf"))
+                     >= ATTACHMENT_URL_TTL)
+            if name in uploaded or name not in self._attachment_urls or stale:
+                self._attachment_urls[name] = attachment.url
+                self._attachment_pinned[name] = now
+
+    def _pins_expiring(self, names) -> bool:
+        """Whether any of these files, pinned, is due a fresh url."""
+        now = time.monotonic()
+        return any(name in self._attachment_urls
+                   and now - self._attachment_pinned.get(name, 0.0)
+                   >= ATTACHMENT_URL_TTL for name in names)
 
     async def _refresh_locked(self, channel) -> None:
         # Fetch the message and adopt its attachments BEFORE composing.
@@ -5583,6 +5601,12 @@ class Dashboard(commands.Cog):
                     "Adopted %d existing attachment(s) -- no re-upload "
                     "needed on this restart", len(self._attachment_urls),
                 )
+        elif message is not None:
+            # A pin about to expire takes the url this fetch just got: once
+            # a day, instead of falling back to attachment:// (a reload on
+            # every edit) for as long as the bot runs.
+            self._pin_attachments([a for a in message.attachments
+                                   if a.filename in self._attachment_urls])
 
         # The CARDS message needs the same treatment, and did not get it.
         # Its adoption lived inside _push_cards, which runs AFTER _compose --
@@ -5595,6 +5619,7 @@ class Dashboard(commands.Cog):
 
         try:
             embeds, files, view = await self._compose()
+            drawn = self._page_rendered
         except Exception:
             logger.exception("Failed to build dashboard embed")
             return
@@ -5657,12 +5682,12 @@ class Dashboard(commands.Cog):
                     if await self._push_cards(cards_channel, card_e,
                                               card_f, view):
                         self._cards_payload = card_print
-                        self._rendered_page = self._card_page
+                        self._rendered_page = drawn
             else:
                 delivered = await self._push(channel, message, embeds,
                                              files, view)
                 if delivered:
-                    self._rendered_page = self._card_page
+                    self._rendered_page = drawn
             if self.recent_enabled and not self.recent_in_main:
                 # In-main mode already rendered it as a field; pushing a
                 # second copy would say the same thing twice.
@@ -5842,6 +5867,7 @@ class Dashboard(commands.Cog):
             "seek": seek,
             "jobs": jobs,
             "queued": (downloads or {}).get("queued_total"),
+            "unreachable": (downloads or {}).get("unreachable") or [],
             "online": (activity is not None),
         }, sort_keys=True)
 

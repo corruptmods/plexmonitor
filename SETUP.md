@@ -18,6 +18,11 @@ docker compose up -d --build
 The image is built from this folder. Your settings and the bot's state live in
 `data/`, a bind mount, so rebuilding never loses them.
 
+**Run it as a regular user (recommended):** set `PUID` and `PGID` in `.env`
+to your own ids (`id -u`, `id -g`), or 568 on TrueNAS. The bot then runs as
+that user and `data/` is handed to it on start. Left blank, it runs as root,
+as older versions did.
+
 **Dockge:** clone into your stacks directory (for example
 `/opt/stacks/plex-monitor/`), create `.env`, and the stack appears in Dockge.
 **Deploy** builds it. After pulling new code, use **Stop → Deploy**.
@@ -280,8 +285,11 @@ Port 8322 is published by `compose.yaml` on every interface of the host, and
 Docker bypasses most host firewalls. Keep the host off the internet, or bind it
 to one address in `compose.yaml` (for example `"192.168.1.10:8322:8322"`). To
 require a secret, set `webhook.secret` in `data/config.json` and use
-`http://<bot host>:8322/webhook/<secret>` instead. The worst a stranger can do
-with the URL is trigger refreshes, which are rate limited anyway.
+`http://<bot host>:8322/webhook/<secret>` instead. Without the secret, anyone
+who can reach the port can trigger refreshes (rate limited). Connections that
+go quiet are closed after a few seconds, so holding many open can't starve
+the bot. Not using the webhook? Set `webhook.enabled` to `false` and remove
+the `ports:` lines from `compose.yaml`.
 
 ### Download clients
 
@@ -324,7 +332,13 @@ of finished jobs, and what the bot saw leave the queue at 100%.
 
 The `downloads` section of `data/config.json` (`max_items`, `max_name_length`,
 and `keywords`, which trims release tags like `1080p` off names) covers every
-client. An older config's `sabnzbd` section is still read when there's no
+client. A keyword only counts as a whole word after the title's year or
+episode number, so `DL` trims `WEB-DL` but leaves "The Middle" alone.
+
+A client that can't be reached shows as **Can't reach …** on the dashboard
+rather than an empty queue. Each address should be the client itself: if it
+redirects to another server (a login page, say), the bot won't send your
+password there and logs where it pointed instead. An older config's `sabnzbd` section is still read when there's no
 `downloads` one.
 
 ### Stream cards channel

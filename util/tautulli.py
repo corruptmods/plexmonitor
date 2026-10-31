@@ -18,12 +18,18 @@ including numbers, so every value is cast defensively.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from util import safehttp
+
 logger = logging.getLogger("plexmonitor.tautulli")
+
+# A poster from Tautulli's image proxy is a few hundred kilobytes.
+POSTER_MAX_BYTES = 20 * 1024 * 1024
 
 
 def _int(value: Any, default: int = 0) -> int:
@@ -40,7 +46,7 @@ def _str(value: Any, default: str = "") -> str:
     return text if text else default
 
 
-def _pretty_resolution(value: str) -> str:
+def pretty_resolution(value: str) -> str:
     """Tautulli reports "4k"/"sd" in lowercase; everything else is already fine."""
     lowered = (value or "").strip().lower()
     if lowered in ("4k", "2160", "2160p"):
@@ -89,11 +95,11 @@ class TautulliClient:
             async with session.get(url, params=query) as response:
                 # Tautulli returns 400 with a JSON error body, so read the body
                 # before raising on status -- otherwise the useful message is lost.
-                text = await response.text()
+                text = await safehttp.read_text(response)
                 if response.status >= 400:
                     raise TautulliError(f"HTTP {response.status} from Tautulli: {text[:200]}")
                 try:
-                    payload = await response.json(content_type=None)
+                    payload = json.loads(text)
                 except Exception as exc:
                     raise TautulliError(f"Tautulli returned non-JSON: {text[:200]}") from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -128,8 +134,6 @@ class TautulliClient:
             # music, so the two can disagree.
             "count": len(sessions),
             "transcode_count": _int(data.get("stream_count_transcode")),
-            "direct_play_count": _int(data.get("stream_count_direct_play")),
-            "direct_stream_count": _int(data.get("stream_count_direct_stream")),
             "total_bandwidth": _int(data.get("total_bandwidth")),   # kbps
             "lan_bandwidth": _int(data.get("lan_bandwidth")),
             "wan_bandwidth": _int(data.get("wan_bandwidth")),
@@ -216,8 +220,8 @@ class TautulliClient:
             if session.get("subtitle_decision") == "burn":
                 reasons.append("subtitles")
             if session.get("video_decision") == "transcode":
-                src = _pretty_resolution(session.get("source_resolution", ""))
-                out = _pretty_resolution(session.get("resolution", ""))
+                src = pretty_resolution(session.get("source_resolution", ""))
+                out = pretty_resolution(session.get("resolution", ""))
                 if src and out and src != out:
                     reasons.append(f"{src}→{out}")
                 else:
@@ -269,7 +273,8 @@ class TautulliClient:
                 content_type = response.headers.get("Content-Type", "")
                 if "image" not in content_type:
                     return None  # error envelope came back as JSON
-                data = await response.read()
+                data = await safehttp.read_bytes(response,
+                                                 POSTER_MAX_BYTES)
                 return data if data else None
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.debug("Poster fetch failed for %s: %s", img_path, exc)

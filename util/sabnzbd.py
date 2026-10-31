@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
-from util.downloadclient import DownloadClient, DownloadClientError, number
+from util.downloadclient import (DownloadClient, DownloadClientError, number,
+                                 raise_for)
+from util.safehttp import read_json
 
 # Queue statuses that mean "not downloading right now", in the dashboard's
 # words.
@@ -17,6 +19,9 @@ STATUS_WORDS = {
     "propagating": "waiting to start",
     "checking": "checking",
 }
+# Force priority downloads even while the queue as a whole is paused
+# (shown as "Force", or 2 by older versions).
+FORCE = {"force", "2"}
 
 
 class SabnzbdClient(DownloadClient):
@@ -27,14 +32,12 @@ class SabnzbdClient(DownloadClient):
         self.api_key = api_key or ""
 
     async def _api(self, mode: str, **extra: str) -> Dict[str, Any]:
-        session = await self.session()
         params = {"apikey": self.api_key, "output": "json", "mode": mode,
                   **extra}
-        async with session.get(urljoin(self.url + "/", "api"),
-                               params=params) as response:
-            if not response.ok:
-                raise DownloadClientError(f"HTTP {response.status}")
-            data = await response.json(content_type=None)
+        async with await self.send("GET", urljoin(self.url + "/", "api"),
+                                   params=params) as response:
+            raise_for(response)
+            data = await read_json(response)
         if not isinstance(data, dict):
             raise DownloadClientError("not a SABnzbd answer")
         if data.get("status") is False:
@@ -50,7 +53,9 @@ class SabnzbdClient(DownloadClient):
         items = []
         for slot in queue.get("slots") or []:
             status = str(slot.get("status") or "").strip().lower()
-            word = "paused" if all_paused else STATUS_WORDS.get(status, "")
+            forced = str(slot.get("priority") or "").strip().lower() in FORCE
+            word = ("paused" if all_paused and not forced
+                    else STATUS_WORDS.get(status, ""))
             timeleft = str(slot.get("timeleft") or "")
             items.append(self.item(
                 slot.get("nzo_id") or slot.get("filename") or "",
@@ -61,11 +66,11 @@ class SabnzbdClient(DownloadClient):
                 status=word,
                 timeleft="" if word or timeleft == "0:00:00" else timeleft,
                 category=slot.get("cat")))
-        if items and not all_paused:
-            # SABnzbd reports one speed for the whole queue.
-            downloading = [i for i in items if not i["status"]]
-            if len(downloading) == 1:
-                downloading[0]["speed_bps"] = number(queue.get("kbpersec")) * 1024
+        # SABnzbd reports one speed for the whole queue: it's a job's own
+        # only when that job is the one downloading.
+        downloading = [i for i in items if not i["status"]]
+        if len(downloading) == 1:
+            downloading[0]["speed_bps"] = number(queue.get("kbpersec")) * 1024
         return items, {
             "speed_bps": number(queue.get("kbpersec")) * 1024,
             "disk_free": _disk(queue.get("diskspace1")),
@@ -89,13 +94,10 @@ class SabnzbdClient(DownloadClient):
                 continue
             if not str(slot.get("storage") or "").strip():
                 continue
-            done.append({
-                "name": slot.get("name") or slot.get("nzb_name") or "Unknown",
-                "category": slot.get("category") or "",
-                "size": slot.get("size") or "",
-                "bytes": slot.get("bytes") or 0,
-                "completed": number(slot.get("completed")),
-            })
+            done.append(self.history_item(
+                slot.get("name") or slot.get("nzb_name"),
+                slot.get("category"), slot.get("bytes"),
+                slot.get("completed"), size=str(slot.get("size") or "")))
         return done
 
 

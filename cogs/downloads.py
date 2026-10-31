@@ -16,7 +16,8 @@ DOWNLOAD_VERIFY_SSL=false accepts self-signed certificates.
 The dashboard asks this cog, never a client:
 
   get_info()     the queue: the first few jobs for display, every job's id
-                 (to notice completions), the total count, combined speed
+                 (to notice completions), the total count, combined speed,
+                 and which clients couldn't be read
   get_history()  recently finished jobs, newest first, from every client
   clean_name()   a release name trimmed for display
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, Dict, List
 
 from discord.ext import commands
@@ -79,7 +81,27 @@ def format_speed(bytes_per_second: float) -> str:
 
 def _empty() -> Dict[str, Any]:
     return {"downloads": [], "queued_total": 0, "speed": None,
-            "diskspace1": None, "diskspacetotal1": None}
+            "diskspace1": None, "diskspacetotal1": None, "unreachable": []}
+
+
+# What a release name says after its title: the year, or SxxEyy. Release
+# tags (1080p, WEB-DL...) are only looked for after it, so a title that
+# happens to contain a tag word ("The English", "Godless") stays whole.
+_TITLE_END = re.compile(
+    r"(?<![a-z0-9])(?:(?:19|20)\d{2}|s\d{1,2}(?:e\d{1,3})+|s\d{1,2})"
+    r"(?![a-z0-9])")
+
+
+def _cut_at(lowered: str, keyword: str, start: int) -> int:
+    """Where a release tag starts (as a whole word, not inside one), at or
+    after `start`; -1 when it doesn't appear."""
+    match = re.compile(r"(?<![a-z0-9])" + re.escape(keyword.lower())
+                       + r"(?![a-z0-9])").search(lowered, start)
+    return match.start() if match else -1
+
+
+def _off(value: str) -> bool:
+    return value.strip().lower() in ("false", "0", "no", "off")
 
 
 class Downloads(commands.Cog):
@@ -111,7 +133,7 @@ class Downloads(commands.Cog):
         env = os.getenv
         shared = {
             "categories": env("DOWNLOAD_CATEGORIES", "").split(","),
-            "verify_ssl": env("DOWNLOAD_VERIFY_SSL", "true").lower() != "false",
+            "verify_ssl": not _off(env("DOWNLOAD_VERIFY_SSL", "true")),
         }
         clients: List[Any] = []
         if env("SABNZBD_URL") and env("SABNZBD_API_KEY"):
@@ -152,10 +174,11 @@ class Downloads(commands.Cog):
     async def get_info(self) -> Dict[str, Any]:
         """Every client's queue as one.
 
-        `slots` lists every job (not just the displayed ones) with its id;
-        the dashboard notices a completion when an id that was at ~100%
-        disappears. When any client couldn't be read, `slots` is left out:
-        its jobs would otherwise look like they all just left the queue.
+        `slots` lists every job (not just the displayed ones) with its id
+        ("<client>:<id>"); the dashboard notices a completion when an id
+        that was at ~100% disappears. `unreachable` names the clients that
+        couldn't be read: their jobs aren't in `slots`, and mustn't look
+        like they all just left the queue.
         """
         if not self.enabled:
             return _empty()
@@ -164,12 +187,12 @@ class Downloads(commands.Cog):
         items: List[Dict[str, Any]] = []
         speed = 0.0
         disk_free = disk_total = None
-        complete = True
+        unreachable: List[str] = []
         for client, result in zip(self.clients, results):
             if isinstance(result, BaseException) or result is None:
                 if isinstance(result, BaseException):
                     logger.warning("%s queue failed: %s", client.name, result)
-                complete = False
+                unreachable.append(client.name)
                 continue
             items.extend(result["items"])
             speed += result.get("speed_bps") or 0.0
@@ -191,14 +214,14 @@ class Downloads(commands.Cog):
             "speed": format_speed(speed) if items else None,
             "diskspace1": disk_free,
             "diskspacetotal1": disk_total,
-        }
-        if complete:
-            info["slots"] = [{
+            "unreachable": unreachable,
+            "slots": [{
                 "id": item["id"],
                 "name": item["name"],
                 "progress": item["progress"],
                 "size": format_size(item.get("size_bytes", -1)),
-            } for item in items]
+            } for item in items],
+        }
         return info
 
     async def get_history(self, limit: int = 10,
@@ -223,11 +246,14 @@ class Downloads(commands.Cog):
 
     def clean_name(self, name: str) -> str:
         """Strip release-tag noise and truncate for display. Keywords match
-        case-insensitively, and only after the start of the title."""
+        case-insensitively as whole words, after the title: after its year
+        or SxxEyy when the name has one, otherwise after its first word."""
         cleaned = name or ""
         lowered = cleaned.lower()
-        cuts = [position for keyword in self.keywords
-                if (position := lowered.find(keyword.lower())) > 0]
+        title_end = _TITLE_END.search(lowered, 1)
+        start = title_end.end() if title_end else 1
+        cuts = [position for keyword in self.keywords if keyword.strip()
+                if (position := _cut_at(lowered, keyword.strip(), start)) > 0]
         if cuts:
             cleaned = cleaned[: min(cuts)]
         cleaned = cleaned.replace(".", " ").strip(" -_")
