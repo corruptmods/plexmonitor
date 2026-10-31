@@ -43,9 +43,11 @@ logger = logging.getLogger("plexmonitor.requests")
 AUTOCOMPLETE_TIMEOUT = 2.5
 ANNOUNCED_KEEP = 500
 # Tries per title before an announcement that can't work (the title is gone
-# from Seerr, the channel was deleted) is dropped. Anything else -- Discord
-# or Seerr having a bad few minutes -- is tried again on every poll until
-# the request is too old to be news (max_age_hours), or this many polls.
+# from Seerr, the channel was deleted, Discord refuses the post itself) is
+# dropped. Anything else -- Discord or Seerr having a bad few minutes, or the
+# bot missing permission in the channel until someone fixes it -- is tried
+# again on every poll until the request is too old to be news
+# (max_age_hours), or this many polls.
 MAX_ATTEMPTS = 3
 MAX_RETRIES = 720
 # One pending ask-an-admin link request per person per this many seconds.
@@ -1144,7 +1146,9 @@ class Requests(commands.Cog):
             except Exception as exc:
                 tries = self._failures.get(key, 0) + 1
                 self._failures[key] = tries
-                lasting = isinstance(exc, discord.NotFound) or (
+                lasting = (
+                    isinstance(exc, discord.HTTPException)
+                    and exc.status in (400, 404)) or (
                     isinstance(exc, SeerrError) and 400 <= exc.status < 500)
                 limit = MAX_ATTEMPTS if lasting else MAX_RETRIES
                 if tries < limit:

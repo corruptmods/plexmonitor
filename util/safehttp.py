@@ -56,6 +56,13 @@ async def request(session: aiohttp.ClientSession, method: str,
                 "where it really is")
         if following.query_string:
             kwargs.pop("params", None)      # the new address carries them
+        if response.status == 303 and method != "HEAD" or (
+                response.status in (301, 302) and method == "POST"):
+            # "See other": fetch it, don't post to it again (what browsers
+            # and aiohttp do). 307 and 308 keep the method and body.
+            method = "GET"
+            kwargs.pop("data", None)
+            kwargs.pop("json", None)
         target = following
     raise RedirectRefused(f"{target.host} redirects too many times")
 

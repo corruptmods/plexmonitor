@@ -76,8 +76,10 @@ def secret_forms() -> list:
     forms = set()
     for name in SECRET_SETTINGS:
         value = os.getenv(name, "").strip()
-        # Very short values would blank ordinary words all over the log.
-        if len(value) >= 4:
+        # Very short values would blank ordinary words all over the log (a
+        # password "plex" in every logger name); those are still caught
+        # in password=..., "apikey": ... and header forms below.
+        if len(value) >= 6:
             forms.update({value, quote(value, safe="")})
     for user, password in BASIC_LOGINS:
         user, password = os.getenv(user, ""), os.getenv(password, "")

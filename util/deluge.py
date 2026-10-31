@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from util.downloadclient import (DownloadClientError, TorrentClient, number,
-                                 raise_for)
+from util.downloadclient import (MAX_ANSWER, DownloadClientError,
+                                 TorrentClient, number, raise_for)
 from util.safehttp import read_json
 
 FIELDS = ["name", "state", "download_payload_rate", "eta",
@@ -67,7 +67,7 @@ class DelugeClient(TorrentClient):
                 json={"method": method, "params": list(params),
                       "id": self._request_id}) as response:
             raise_for(response)
-            data = await read_json(response)
+            data = await read_json(response, MAX_ANSWER)
             if method == "auth.login":
                 cookie = response.cookies.get("_session_id")
                 self._cookie = f"_session_id={cookie.value}" if cookie else ""

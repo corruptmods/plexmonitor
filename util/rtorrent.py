@@ -14,8 +14,8 @@ import xmlrpc.client
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
-from util.downloadclient import (DownloadClientError, TorrentClient, number,
-                                 raise_for)
+from util.downloadclient import (MAX_ANSWER, DownloadClientError,
+                                 TorrentClient, number, raise_for)
 from util.safehttp import read_text
 
 FIELDS = ["d.hash=", "d.name=", "d.state=", "d.is_open=", "d.is_active=",
@@ -68,7 +68,7 @@ class RtorrentClient(TorrentClient):
                                    headers={"Content-Type": "text/xml"}
                                    ) as response:
             raise_for(response)
-            text = await read_text(response)
+            text = await read_text(response, MAX_ANSWER)
         try:
             result, _method = xmlrpc.client.loads(text, use_builtin_types=True)
         except xmlrpc.client.Fault as fault:

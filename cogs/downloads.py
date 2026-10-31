@@ -100,6 +100,21 @@ def _cut_at(lowered: str, keyword: str, start: int) -> int:
     return match.start() if match else -1
 
 
+def _tags_before(lowered: str, end: int, keywords: List[str]) -> int:
+    """Where an unbroken run of release tags ending at `end` starts (only
+    separators between them), or `end` when there is none."""
+    cut = end
+    while True:
+        head = lowered[:cut].rstrip(" ._-[]()")
+        found = next((len(head) - len(k) for k in keywords
+                      if head.endswith(k) and (len(head) == len(k)
+                                               or not head[-len(k) - 1]
+                                               .isalnum())), None)
+        if found is None or found <= 0:
+            return cut
+        cut = found
+
+
 def _off(value: str) -> bool:
     return value.strip().lower() in ("false", "0", "no", "off")
 
@@ -250,10 +265,20 @@ class Downloads(commands.Cog):
         or SxxEyy when the name has one, otherwise after its first word."""
         cleaned = name or ""
         lowered = cleaned.lower()
+        keywords = [k.strip().lower() for k in self.keywords if k.strip()]
         title_end = _TITLE_END.search(lowered, 1)
         start = title_end.end() if title_end else 1
-        cuts = [position for keyword in self.keywords if keyword.strip()
-                if (position := _cut_at(lowered, keyword.strip(), start)) > 0]
+        cuts = [position for keyword in keywords
+                if (position := _cut_at(lowered, keyword, start)) > 0]
+        if not cuts and title_end:
+            # Tags placed before the year ("Title.1080p.2019"): only a run of
+            # them right up against it, with a tag like 1080p in it, so a
+            # title word that happens to be a keyword stays ("The English
+            # Patient 1996", "The English S01E01").
+            cut = _tags_before(lowered, title_end.start(), keywords)
+            if 0 < cut < title_end.start() and any(
+                    ch.isdigit() for ch in lowered[cut:title_end.start()]):
+                cuts = [cut]
         if cuts:
             cleaned = cleaned[: min(cuts)]
         cleaned = cleaned.replace(".", " ").strip(" -_")

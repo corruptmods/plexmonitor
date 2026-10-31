@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
-from util.downloadclient import (DownloadClient, DownloadClientError, number,
-                                 raise_for)
+from util.downloadclient import (MAX_ANSWER, DownloadClient,
+                                 DownloadClientError, number, raise_for)
 from util.safehttp import read_json
 
 # Queue statuses that mean "not downloading right now", in the dashboard's
@@ -37,7 +37,7 @@ class SabnzbdClient(DownloadClient):
         async with await self.send("GET", urljoin(self.url + "/", "api"),
                                    params=params) as response:
             raise_for(response)
-            data = await read_json(response)
+            data = await read_json(response, MAX_ANSWER)
         if not isinstance(data, dict):
             raise DownloadClientError("not a SABnzbd answer")
         if data.get("status") is False:

@@ -5,8 +5,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-from util.downloadclient import (DownloadClient, DownloadClientError,
-                                 eta_text, number, raise_for)
+from util.downloadclient import (MAX_ANSWER, DownloadClient,
+                                 DownloadClientError, eta_text, number,
+                                 raise_for)
 from util.safehttp import read_json
 
 MB = 1024 * 1024
@@ -42,7 +43,7 @@ class NzbgetClient(DownloadClient):
                                          "params": list(params),
                                          "id": 1}) as response:
             raise_for(response)
-            data = await read_json(response)
+            data = await read_json(response, MAX_ANSWER)
         if not isinstance(data, dict):
             raise DownloadClientError("not an NZBGet answer")
         if data.get("error"):

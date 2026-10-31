@@ -18,7 +18,7 @@ import asyncio
 import time
 from typing import Any, Dict, List, Tuple
 
-from util.downloadclient import (REFUSED, DownloadClient,
+from util.downloadclient import (MAX_ANSWER, REFUSED, DownloadClient,
                                  DownloadClientError, eta_text, number)
 from util.safehttp import read_json, read_text
 
@@ -128,7 +128,7 @@ class QbittorrentClient(DownloadClient):
                         "QBITTORRENT_PASSWORD")
                 if not response.ok:
                     raise DownloadClientError(f"HTTP {response.status}")
-                return await read_json(response)
+                return await read_json(response, MAX_ANSWER)
         return None
 
     async def _torrents(self, **params: str) -> List[Dict[str, Any]]:

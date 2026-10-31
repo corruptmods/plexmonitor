@@ -10,6 +10,7 @@ spend money or show who is watching what are for its members only.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -21,6 +22,9 @@ logger = logging.getLogger("plexmonitor.auth")
 
 # How long a "member or not" answer is trusted before asking Discord again.
 MEMBER_TTL = 600.0
+# Most a lookup may take: the check often runs before an interaction is
+# answered, which Discord allows three seconds for.
+MEMBER_LOOKUP_SECONDS = 1.5
 # user id -> (member, when it was checked)
 _members: Dict[int, Tuple[bool, float]] = {}
 
@@ -102,8 +106,8 @@ async def is_member(client: discord.Client, user: discord.abc.User,
 
     `guild` is where they asked from; inside the home server they're a
     member without any lookup. When Discord can't say (the server isn't
-    loaded yet right after a reconnect), they're let in rather than
-    refusing everyone."""
+    loaded yet right after a reconnect, or it's slow to answer), they're
+    let in rather than refusing everyone."""
     home = home_guild(client)
     if home is None:
         return True
@@ -113,7 +117,11 @@ async def is_member(client: discord.Client, user: discord.abc.User,
     seen = _members.get(user.id)
     if seen is not None and now - seen[1] < MEMBER_TTL:
         return seen[0]
-    allowed = await home_member(client, user.id)
+    try:
+        allowed = await asyncio.wait_for(home_member(client, user.id),
+                                         MEMBER_LOOKUP_SECONDS)
+    except asyncio.TimeoutError:
+        allowed = None
     if allowed is None:
         return True
     if len(_members) > 10000:

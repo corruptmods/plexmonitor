@@ -43,6 +43,10 @@ logger = logging.getLogger("plexmonitor.downloads")
 # How long a client's failure stays quiet in the log after being reported.
 WARN_EVERY = 600.0
 TIMEOUT = 10.0
+# Most a client's reply may be. qBittorrent lists every torrent at about
+# 1.6 KB each, so a 40,000-torrent seedbox is near this; anything far past
+# it isn't a download client talking.
+MAX_ANSWER = 64 * 1024 * 1024
 REFUSED = "it didn't accept the username or password"
 
 
@@ -107,6 +111,8 @@ class DownloadClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock = asyncio.Lock()
         self._warned_at: Dict[str, float] = {}
+        self._recovered_at: Dict[str, float] = {}
+        self._failing: set = set()
 
     # ------------------------------------------------------------- plumbing
 
@@ -150,6 +156,7 @@ class DownloadClient:
             await self._session.close()
 
     def _failed(self, what: str, exc: BaseException) -> None:
+        self._failing.add(what)
         if time.monotonic() - self._warned_at.get(what, float("-inf")) \
                 < WARN_EVERY:
             return
@@ -159,7 +166,14 @@ class DownloadClient:
         logger.error("%s %s failed: %s", self.name, what, detail)
 
     def _worked(self, what: str) -> None:
-        if self._warned_at.pop(what, None) is not None:
+        """Says so when a failing client recovers -- as sparingly as
+        failures, so one that keeps flapping doesn't fill the log."""
+        if what not in self._failing:
+            return
+        self._failing.discard(what)
+        if time.monotonic() - self._recovered_at.get(what, float("-inf")) \
+                >= WARN_EVERY:
+            self._recovered_at[what] = time.monotonic()
             logger.info("%s %s works again", self.name, what)
 
     def _wanted(self, category: Any) -> bool:

@@ -13,8 +13,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from util.downloadclient import (DownloadClientError, TorrentClient, number,
-                                 raise_for)
+from util.downloadclient import (MAX_ANSWER, DownloadClientError,
+                                 TorrentClient, number, raise_for)
 from util.safehttp import read_json
 
 FIELDS = ["hashString", "name", "status", "percentDone", "rateDownload",
@@ -93,7 +93,7 @@ class TransmissionClient(TorrentClient):
                         "X-Transmission-Session-Id", "")[:200]
                     continue
                 raise_for(response)
-                data = await read_json(response)
+                data = await read_json(response, MAX_ANSWER)
             if not isinstance(data, dict) or data.get("result") != "success":
                 raise DownloadClientError(str(
                     (data.get("result") if isinstance(data, dict) else None)
