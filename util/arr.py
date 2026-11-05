@@ -149,7 +149,13 @@ class ArrClient:
                     out.add(key[3:])
         return sorted(out)
 
-    async def poster_map(self) -> Dict[str, str]:
+    def poster_map_age(self) -> Optional[float]:
+        """Seconds since the poster map was read, or None if never."""
+        if self._poster_cache_at is None:
+            return None
+        return time.monotonic() - self._poster_cache_at
+
+    async def poster_map(self, fresh: bool = False) -> Dict[str, str]:
         """normalised title -> public poster URL, cached for hours.
 
         The point of these URLs is what they are NOT: attachments. A poster
@@ -166,7 +172,9 @@ class ArrClient:
         # each one fired its own library download.
         async with self._poster_lock:
             now = time.monotonic()
-            if (self._poster_cache_at is not None
+            # fresh: read the library again now -- a title just imported
+            # isn't in a map read hours ago.
+            if (not fresh and self._poster_cache_at is not None
                     and now - self._poster_cache_at < POSTER_TTL):
                 return self._poster_cache or {}
             records = await self._fetch_library()

@@ -48,6 +48,7 @@ from util.formatting import (
 from util import arr as arrapi
 from util import cardimage
 from util import textwidth
+from util.seerr import summarize as seerr_summarize
 from util.kuma import KumaClient
 from util.uptimerobot import UptimeRobotClient
 from util.kuma_history import SOCKETIO_AVAILABLE, KumaHistoryClient
@@ -60,7 +61,7 @@ logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.1.2"
+BUILD = "v1.1.3"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -70,6 +71,20 @@ PRESENCE_MIN_GAP = 15.0
 # ("plexmon:"), or another program sharing the bot token -- and is never
 # swept.
 OWN_ID_PREFIXES = ("plex-monitor:",)
+
+
+def _same_title(ours: Any, theirs: Any) -> bool:
+    """Whether a search result is this title: the same name, or the name
+    our title is a cut of ("The Office: Superfan Episodes" -> The Office).
+    Punctuation, case and a leading "The" don't count."""
+    norm = arrapi.ArrClient._norm
+    a, b = norm(str(ours or "")), norm(str(theirs or ""))
+    if not a or not b:
+        return False
+    if a == b or a.removeprefix("the") == b.removeprefix("the"):
+        return True
+    head = str(ours or "").split(":", 1)[0]
+    return ":" in str(ours or "") and norm(head) == b
 
 
 def md(text: Any) -> str:
@@ -3439,11 +3454,20 @@ class Dashboard(commands.Cog):
             self._poster_cache[path] = data
         return data
 
+    # A poster miss re-reads a Radarr/Sonarr library at most this often (a
+    # library is megabytes), and once per title.
+    ARR_REFRESH_GAP = 60.0
+    # How long Seerr's answer for a title (or its lack of one) is kept.
+    SEERR_POSTER_TTL = 3600.0
+
     async def _remote_poster(self, session) -> Optional[str]:
         """Public poster URL for a session, or None.
 
         Sonarr is consulted for series, Radarr for films, both as a
-        fallback. A miss simply means no artwork on that card -- falling
+        fallback. A title imported since their libraries were last read
+        gets them read again (once). Not there at all -- a Plex-only show,
+        a cut like "The Office: Superfan Episodes" -- Seerr's TMDB poster
+        stands in. A miss simply means no artwork on that card: falling
         back to an attachment would put files back on the message, which is
         the exact cost this mode exists to remove.
         """
@@ -3452,28 +3476,90 @@ class Dashboard(commands.Cog):
         keys = self._poster_keys(session)
         if not keys:
             return None
+        url = await self._arr_poster(keys, is_series)
+        if url is None:
+            refreshed = self.__dict__.setdefault("_arr_refreshed", set())
+            if name not in refreshed:
+                refreshed.add(name)
+                url = await self._arr_poster(keys, is_series, fresh=True)
+        if url is None:
+            url = await self._seerr_poster(session, keys)
+        if url:
+            return url
+        # Once per title, not per tick: the miss is a library/spelling
+        # question the operator may want to answer, not a fault to spam.
+        misses = self.__dict__.setdefault("_poster_misses", set())
+        if name not in misses:
+            misses.add(name)
+            logger.info("No remote poster for %r (tried %s, and Seerr)",
+                        name, ", ".join(keys[:6]))
+        return None
+
+    async def _arr_poster(self, keys: List[str], is_series: bool,
+                          fresh: bool = False) -> Optional[str]:
+        """The poster Radarr/Sonarr have under any of these keys. fresh:
+        read their libraries again first (no more than once a minute)."""
         ordered = sorted(self._arr,
                          key=lambda c: c.kind != ("sonarr" if is_series
                                                   else "radarr"))
         for client in ordered:
             if not client.enabled:
                 continue
+            reread = fresh
+            if fresh:
+                age = client.poster_map_age()
+                reread = age is None or age >= self.ARR_REFRESH_GAP
             try:
-                posters = await client.poster_map()
+                posters = await client.poster_map(fresh=reread)
             except Exception:
                 continue
             for key in keys:
                 url = posters.get(key)
                 if url:
                     return url
-        # Once per title, not per tick: the miss is a library/spelling
-        # question the operator may want to answer, not a fault to spam.
-        misses = self.__dict__.setdefault("_poster_misses", set())
-        if name not in misses:
-            misses.add(name)
-            logger.info("No remote poster for %r (tried %s)", name,
-                        ", ".join(keys[:6]))
         return None
+
+    async def _seerr_poster(self, session,
+                            keys: List[str]) -> Optional[str]:
+        """TMDB's poster through Seerr: by the TMDB id Plex has for the
+        title, else by searching its title. A search result counts only
+        when it IS the title, or the title is a cut of it ("The Office:
+        Superfan Episodes" is The Office); a film's year must match too."""
+        requests = self.bot.get_cog("Requests")
+        seerr = getattr(requests, "seerr", None)
+        if seerr is None or not getattr(seerr, "enabled", False):
+            return None
+        is_series = bool(session.get("series"))
+        kind = "tv" if is_series else "movie"
+        title = str(session.get("series") or session.get("title") or "")
+        cache = self.__dict__.setdefault("_seerr_posters", {})
+        known = cache.get((kind, title))
+        if known and time.monotonic() - known[1] < self.SEERR_POSTER_TTL:
+            return known[0]
+        url = None
+        try:
+            tmdb = next((k.split(":", 2)[2] for k in keys
+                         if k.startswith("id:tmdb:")), None)
+            if tmdb and tmdb.isdigit():
+                found = seerr_summarize(await seerr.details(kind, int(tmdb)))
+                url = (found or {}).get("poster_url") or None
+            if url is None and title:
+                year = "" if is_series else str(session.get("year") or "")
+                for found in await seerr.search(title, timeout=5):
+                    if found.get("media_type") == kind \
+                            and found.get("poster_url") \
+                            and _same_title(title, found.get("title"))\
+                            and (not year or not found.get("year")
+                                 or found.get("year") == year):
+                        url = found["poster_url"]
+                        break
+        except Exception as exc:
+            logger.debug("Seerr poster lookup for %r failed: %s", title, exc)
+            return None                  # not cached: try again next time
+        if len(cache) > 500:
+            cache.clear()
+        cache[(kind, title)] = (url, time.monotonic())
+        return url
 
     @staticmethod
     def _poster_keys(session) -> List[str]:

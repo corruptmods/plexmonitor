@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.3
+
+**Fixed**
+
+- **Missing posters on stream cards.** Two cases, both with
+  `"artwork": "remote"`:
+  - Something imported moments before someone started watching it had no
+    poster for hours. The bot works from a copy of Radarr's and Sonarr's
+    lists that it refreshes every few hours. It now re-reads them the first
+    time a title isn't found.
+  - A title Radarr and Sonarr don't have at all (a Plex-only show, or a cut
+    like "The Office: Superfan Episodes") now gets its poster from Seerr.
+
 ## 1.1.2
 
 A sturdiness release: a security review and a bug hunt, with lots of small
