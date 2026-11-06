@@ -128,8 +128,10 @@ Seerr account** card with two ways to do it:
 
 - **Themselves:** the card shows their Discord ID and an **Open Seerr** button to
   **profile → Settings → Notifications → Discord**. They paste the ID, save, and
-  press **check again**. Only someone signed in to that Seerr account can do this,
-  so it can't be used to claim somebody else's.
+  press **check again**, then confirm **Yes, that's me** on the account the bot
+  shows. Saving the ID needs that Seerr account; confirming needs that Discord
+  account, so nobody can link themselves to someone else, or someone else to
+  them. A Discord ID saved on a Seerr profile does nothing until it's confirmed.
 - **Ask an admin:** they type their Seerr or Plex username. The bot admins get a
   DM with **Approve / Deny**, and the person gets a DM with the result. One
   request per person every 10 minutes.
@@ -141,7 +143,8 @@ Discord only shows these two to people with Manage Server (change that under
 Server Settings → Integrations), and the bot also checks the person is a bot
 admin: Manage Server alone isn't enough, because a link lets someone act as
 that Seerr account. If two Seerr profiles hold the same Discord ID, the bot
-trusts neither until an admin uses `/link`. Approved links and `/link` live in `data/seerr_links.json`. You can also
+trusts neither until an admin uses `/link` (a profile that person already
+confirmed keeps working). Approved links and `/link` live in `data/seerr_links.json`. You can also
 map people by hand in `data/config.json`:
 
 ```json
@@ -244,8 +247,10 @@ history), or before a season and episode they name. It needs Seerr AI, with
 
 The assistant only answers members of the server the dashboard is in (the one
 `CHANNEL_ID` belongs to): DMs from anyone else, and @mentions in any other
-server, are ignored. Its answers can say who is watching what, and the bot's
-own model spends your API key.
+server, are ignored. When Discord can't confirm someone is a member right then (it's
+slow, or the server isn't loaded yet after a reconnect), that message is
+ignored too and they can simply ask again. Its answers can say who is watching
+what, and the bot's own model spends your API key.
 
 Conversations are **private**. Only the person asking ever sees the answer:
 
@@ -577,7 +582,8 @@ the bot. Deleting the first makes it post a fresh dashboard message; deleting
 the second resets the uptime counter. The request and assistant features also
 write `announced_requests.json` (delete to re-arm announcements — the next run
 records the backlog silently again), `ai_usage.json` (today's question
-counts) and `seerr_links.json` (links made with `/link`). `requests` and
+counts), `seerr_links.json` (links made with `/link`) and
+`seerr_confirmed.json` (Seerr profile links people confirmed). `requests` and
 `assistant` in `config.json` hold their settings.
 
 ---

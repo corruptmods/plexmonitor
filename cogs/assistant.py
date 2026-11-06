@@ -173,6 +173,26 @@ def compact_page(pick: Dict[str, Any]) -> Tuple[List[ui.Item], int]:
                                    else "requestable"]
 
 
+# A masked link [label](url), with or without <> around the url.
+_MASKED_LINK = re.compile(r"\[([^\]\n]*)\]\(\s*<?[^)\s>]*>?(?:\s+\"[^\"]*\")?\s*\)")
+_BARE_LINK = re.compile(
+    r"<?\b(?:https?|ftp|discord)://(?:[^\s>)]*[^\s>).,!?;:'\"])?>?", re.I)
+
+
+def without_links(text: str) -> str:
+    """Model and Seerr AI answers with any link taken out. Their context
+    holds text anyone can write (release names, overviews, names), and an
+    answer the bot sends carries the bot's name -- so no link it didn't make
+    itself is ever shown: a masked link keeps only its label."""
+    text = _MASKED_LINK.sub(lambda m: m.group(1), str(text or ""))
+    return _BARE_LINK.sub("(link removed)", text)
+
+
+def outside_text(text: Any) -> str:
+    """A title or name shown as itself, not as markdown or a mention."""
+    return discord.utils.escape_markdown(str(text)).replace("<", "\\<")
+
+
 def build_answer(asked: str, text: str, also: str, footer: str,
                  page: Optional[Tuple[List[ui.Item], int]],
                  keys: List[str], index: int,
@@ -197,6 +217,7 @@ def build_answer(asked: str, text: str, also: str, footer: str,
         tail.append(ui.TextDisplay(footer, id=aipager.FOOTER_ID))
     room = MESSAGE_TEXT - sum(_text_of(i) for i in head + tail + card)
     limit = max(200, min(MAX_ANSWER, room))
+    text = without_links(text)
     body = text if len(text) <= limit else text[: limit - 1] + "…"
     view.add_item(ui.Container(*head, ui.TextDisplay(body,
                                                      id=aipager.TEXT_ID),
@@ -776,7 +797,10 @@ class Assistant(commands.Cog):
             # around.
             if exc.status == 404:
                 seerr.no_ai()
-            if own and exc.status in (0, 403, 404):
+            # A 403 only means "off" when Seerr says so (or gives no code,
+            # as builds without codes do) -- never stand in for a limit.
+            off = exc.status == 403 and exc.code in ("", "off")
+            if own and (exc.status in (0, 404) or off):
                 logger.info("Seerr AI unavailable for %s (%s) -- the bot's "
                             "own model answers", seerr_user["name"], exc)
                 return await self._own(user, question, history)
@@ -820,7 +844,8 @@ class Assistant(commands.Cog):
         rest = answer.picks[len(keys):]
         also = ""
         if rest:
-            names = ", ".join(seerrapi.display_title(p) for p in rest[:12])
+            names = ", ".join(outside_text(seerrapi.display_title(p))
+                              for p in rest[:12])
             more = f" and {len(rest) - 12} more" if len(rest) > 12 else ""
             also = requestui._clip(f"-# Also: {names}{more}", 600)
         page = answer.page
@@ -1109,7 +1134,8 @@ class Assistant(commands.Cog):
                                    if position else "")
         heading = (f"### Previously on {discord.utils.escape_markdown(name)}"
                    f"\n-# Everything before {upto}{where}")
-        body = text or "Seerr's AI didn't come back with a recap."
+        body = without_links(text) or \
+            "Seerr's AI didn't come back with a recap."
         view = requestui.Card()
         view.add_item(ui.Container(
             ui.TextDisplay(heading),

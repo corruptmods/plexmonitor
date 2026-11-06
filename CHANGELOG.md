@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.1.4
+
+Fixes from a security review. One thing to know after updating:
+
+- **People who linked themselves through their Seerr profile confirm it
+  once.** The next time they request, report an issue or ask the AI, the bot
+  asks "Is the Seerr account … yours?" with **Yes, that's me** / **Not me**.
+  Only they can answer. Links made with `/link`, approved by an admin, or set
+  in `config.json` don't change. Confirmations are kept in
+  `data/seerr_confirmed.json`.
+
+**Changed**
+
+- Unlinking someone (with `/unlink`, or by editing `discord_links` in
+  `config.json`) takes effect right away.
+- When Discord can't confirm that someone writing to the assistant from a DM
+  or another server is in your server, the message is ignored instead of
+  answered. They can just ask again.
+- Assistant and Seerr AI answers never contain links.
+- Names shown on stream cards, and titles in the assistant's "Also" line,
+  are always shown exactly as written.
+- Each log entry stays on one line, and the logs leave out more of what
+  Discord sends.
+- The dashboard's page buttons only ever change the current dashboard.
+
 ## 1.1.3
 
 **Fixed**

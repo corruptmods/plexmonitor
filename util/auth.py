@@ -106,11 +106,13 @@ async def is_member(client: discord.Client, user: discord.abc.User,
 
     `guild` is where they asked from; inside the home server they're a
     member without any lookup. When Discord can't say (the server isn't
-    loaded yet right after a reconnect, or it's slow to answer), they're
-    let in rather than refusing everyone."""
+    loaded yet right after a reconnect, or it's slow or rate-limited), the
+    answer is no -- that's not cached, so the next try asks again. With no
+    CHANNEL_ID there is no home server to check against, and everyone is
+    let in."""
     home = home_guild(client)
     if home is None:
-        return True
+        return not os.getenv("CHANNEL_ID", "").strip().isdigit()
     if guild is not None and guild.id == home.id:
         return True
     now = time.monotonic()
@@ -123,7 +125,9 @@ async def is_member(client: discord.Client, user: discord.abc.User,
     except asyncio.TimeoutError:
         allowed = None
     if allowed is None:
-        return True
+        logger.info("Could not confirm that %s (%s) is in the home server "
+                    "-- not letting them in this time", user, user.id)
+        return False
     if len(_members) > 10000:
         for uid in [u for u, v in _members.items() if now - v[1] >= MEMBER_TTL]:
             _members.pop(uid, None)

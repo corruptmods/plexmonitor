@@ -83,10 +83,12 @@ class SeerrError(RuntimeError):
     person verbatim.
     """
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, code: str = "") -> None:
         super().__init__(f"Seerr {status or 'unreachable'}: {message}")
         self.status = status
         self.message = message
+        # Seerr AI's machine-readable reason ("off", "limit", ...), if any.
+        self.code = code
 
 
 def poster_url(path: Any) -> str:
@@ -231,6 +233,11 @@ class SeerrClient:
         self._claim_warned: Dict[int, set] = {}
         # Discord IDs saved on more than one Seerr profile (see _load_links).
         self.contested: set = set()
+        # Discord ID -> Seerr user for profile claims the Discord user has
+        # not confirmed yet (see _load_links), and the confirmed pairs.
+        self.pending: Dict[int, Dict[str, Any]] = {}
+        self._confirmed: Dict[int, int] = {}
+        self._overrides: Dict[int, int] = {}
         self._ai_checked_at = float("-inf")
         self._search_cache: Dict[str, tuple] = {}
         self.set_overrides(link_overrides)
@@ -245,7 +252,28 @@ class SeerrClient:
             except (TypeError, ValueError):
                 logger.warning("Ignoring discord_links entry %r -> %r "
                                "(both must be numbers)", key, value)
-        self._overrides = clean
+        self._replace_links("_overrides", clean)
+
+    def set_confirmed(self, confirmed: Optional[Dict[Any, Any]]) -> None:
+        """Profile claims their Discord user has confirmed (Discord ID ->
+        Seerr user), from data/seerr_confirmed.json."""
+        clean: Dict[int, int] = {}
+        for key, value in (confirmed or {}).items():
+            try:
+                clean[int(str(key).strip())] = int(value)
+            except (TypeError, ValueError):
+                continue
+        self._replace_links("_confirmed", clean)
+
+    def _replace_links(self, name: str, new: Dict[int, int]) -> None:
+        """Swap one source of links. A removed or repointed Discord ID stops
+        resolving at once -- not after LINK_TTL, and not again if the next
+        reload fails."""
+        old: Dict[int, int] = getattr(self, name)
+        setattr(self, name, new)
+        changed = {d for d in set(old) | set(new) if old.get(d) != new.get(d)}
+        if changed:
+            self.invalidate_links(drop=changed)
 
     # ------------------------------------------------------------ transport
 
@@ -299,12 +327,13 @@ class SeerrClient:
                     data = None
                 if 200 <= response.status < 300 and response.status != 202:
                     return data
-                message = ""
+                message, code = "", ""
                 if isinstance(data, dict):
                     message = str(data.get("message") or data.get("error")
                                   or "")
+                    code = str(data.get("code") or "")
                 raise SeerrError(response.status,
-                                 message or f"HTTP {response.status}")
+                                 message or f"HTTP {response.status}", code)
         except SeerrError:
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -437,17 +466,28 @@ class SeerrClient:
 
             pairs = await asyncio.gather(*(fetch(u) for u in by_id.values()))
         claims: Dict[int, set] = {}
+        pending: Dict[int, Dict[str, Any]] = {}
         for user, settings in pairs:
             for discord_id in discord_ids_from(settings):
                 claims.setdefault(discord_id, set()).add(int(user["id"]))
-                links[discord_id] = self._user_view(user)
-        # Anyone can type any Discord ID into their own Seerr profile. When
-        # two accounts claim the same one, neither is trusted: the person is
-        # treated as unlinked until an admin uses /link.
+                # Anyone can type any Discord ID into their own Seerr
+                # profile, so a claim only counts once that Discord user has
+                # said "yes, that's me" (Requests.confirm_link).
+                if self._confirmed.get(discord_id) == int(user["id"]):
+                    links[discord_id] = self._user_view(user)
+                else:
+                    pending[discord_id] = self._user_view(user)
+        # An admin link decides a Discord ID only if it names a real user.
+        decided = {d for d, s in self._overrides.items() if s in by_id}
+        # When two accounts claim the same ID, neither is trusted -- the
+        # person is treated as unlinked until an admin uses /link -- unless
+        # the Discord user already confirmed one of them, which then stands.
         contested = set()
         for discord_id, owners in claims.items():
-            if len(owners) > 1 and discord_id not in self._overrides:
+            if len(owners) > 1 and discord_id not in decided \
+                    and self._confirmed.get(discord_id) not in owners:
                 links.pop(discord_id, None)
+                pending.pop(discord_id, None)
                 contested.add(discord_id)
                 if self._claim_warned.get(discord_id) != owners:
                     self._claim_warned[discord_id] = set(owners)
@@ -464,6 +504,10 @@ class SeerrClient:
                                "who does not exist", discord_id, seerr_id)
                 continue
             links[discord_id] = self._user_view(user)
+            pending.pop(discord_id, None)
+        for discord_id in links:
+            pending.pop(discord_id, None)
+        self.pending = pending
         return links
 
     @staticmethod
@@ -501,9 +545,15 @@ class SeerrClient:
                             "Settings -> Notifications) or use /link")
             except SeerrError as exc:
                 logger.warning("Could not read Seerr users: %s", exc)
-                # Keep serving the last good map; retry in a minute.
-                self._links_at = (now - LINK_TTL + 60.0
-                                  if self._links_at is not None else None)
+                if self._links_at is None:
+                    # Never loaded, or a link just changed: the old map may
+                    # hold a link that was removed, so serve nothing and let
+                    # user_for_discord say Seerr is unreachable.
+                    self._links = {}
+                    self.pending = {}
+                else:
+                    # Keep serving the last good map; retry in a minute.
+                    self._links_at = now - LINK_TTL + 60.0
             return self._links
 
     async def user_for_discord(self, discord_id: int
@@ -540,8 +590,12 @@ class SeerrClient:
                     self._links_at = now
         return list(self._users)
 
-    def invalidate_links(self) -> None:
-        """Re-read the Discord -> Seerr map on next use (after /link)."""
+    def invalidate_links(self, drop: Iterable[int] = ()) -> None:
+        """Re-read the Discord -> Seerr map on next use (after /link).
+        `drop` removes those Discord IDs from the current map right away."""
+        for discord_id in drop:
+            self._links.pop(int(discord_id), None)
+            self.pending.pop(int(discord_id), None)
         self._links_at = None
         self._links_forced_at = float("-inf")
 

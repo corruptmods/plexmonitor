@@ -235,11 +235,18 @@ class RateLimitObserver:
         )
 
 
+# Interaction and webhook routes carry a token that lets anyone holding it
+# post or edit as the bot for a while.
+_TOKEN_SEGMENT = re.compile(r"(/(?:webhooks|interactions)/\d+/)[^/?#]+")
+
+
 def _short(url: str) -> str:
-    """Trim a Discord API url down to its route for logging."""
+    """Trim a Discord API url down to its route for logging, with any
+    interaction or webhook token masked."""
     marker = "/api/v"
     index = url.find(marker)
-    return url[index:] if index >= 0 else url
+    route = url[index:] if index >= 0 else url
+    return _TOKEN_SEGMENT.sub(r"\1***", route)
 
 
 def make_trace(observer: RateLimitObserver):

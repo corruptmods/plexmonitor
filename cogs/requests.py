@@ -268,6 +268,8 @@ class Requests(commands.Cog):
         self.data_dir = data_dir()
         self._config_path = os.path.join(self.data_dir, "config.json")
         self._links_file = os.path.join(self.data_dir, "seerr_links.json")
+        self._confirmed_file = os.path.join(self.data_dir,
+                                            "seerr_confirmed.json")
         self._config_mtime = -1.0
         self.config = dict(DEFAULTS)
         self.seerr = SeerrClient(os.getenv("SEERR_URL", ""),
@@ -322,6 +324,9 @@ class Requests(commands.Cog):
         if isinstance(stored, dict):
             links.update(stored)
         self.seerr.set_overrides(links)
+        confirmed = read_json(self._confirmed_file, {})
+        self.seerr.set_confirmed(confirmed if isinstance(confirmed, dict)
+                                 else {})
 
     def _int(self, key: str, low: int, high: int) -> int:
         try:
@@ -719,15 +724,22 @@ class Requests(commands.Cog):
         stored = read_json(self._links_file, {})
         return stored if isinstance(stored, dict) else {}
 
-    def _write_links(self, change) -> None:
-        """Change data/seerr_links.json. Raises OSError when it can't be
-        saved, so nobody is told "linked" when nothing changed."""
-        stored = self._stored_links()
+    def _write_links(self, change, path: Optional[str] = None) -> None:
+        """Change data/seerr_links.json (or another link file). Raises
+        OSError when it can't be saved, so nobody is told "linked" when
+        nothing changed."""
+        path = path or self._links_file
+        stored = read_json(path, {})
+        if not isinstance(stored, dict):
+            stored = {}
+        before = dict(stored)
         change(stored)
-        if not write_json(self._links_file, stored):
-            raise OSError(f"could not write {self._links_file}")
+        if not write_json(path, stored):
+            raise OSError(f"could not write {path}")
         self._apply_links()
-        self.seerr.invalidate_links()
+        self.seerr.invalidate_links(drop={
+            int(k) for k in set(before) | set(stored)
+            if str(k).isdigit() and before.get(k) != stored.get(k)})
 
     async def _link(self, discord_id: int, seerr_id: int) -> Dict[str, Any]:
         """Store a link. Returns the Seerr user; raises SeerrError, or
@@ -829,7 +841,13 @@ class Requests(commands.Cog):
 
     async def link_prompt(self, discord_id: int,
                           note: Optional[str] = None) -> ui.LayoutView:
-        """How someone links themselves (see util/linkui.py)."""
+        """How someone links themselves (see util/linkui.py). If a Seerr
+        profile already holds their Discord ID, they're asked to confirm
+        that account instead."""
+        claim = self.seerr.pending.get(int(discord_id))
+        if claim is not None:
+            return linkui.confirm_view(discord_id, claim["id"], claim["name"],
+                                       note)
         base = await self.seerr.app_url() if self.seerr.enabled else ""
         url = f"{base}/profile/settings/notifications/discord" \
             if base.startswith("http") else ""
@@ -868,6 +886,11 @@ class Requests(commands.Cog):
         except SeerrError as exc:
             await interaction.followup.send(explain(exc), ephemeral=True)
             return
+        if user is None and interaction.user.id in self.seerr.pending:
+            await requestui.followup(
+                interaction, await self.link_prompt(interaction.user.id),
+                ephemeral=True)
+            return
         if user is None and interaction.user.id in self.seerr.contested:
             await interaction.followup.send(
                 "Your Discord ID is saved on more than one Seerr account, so "
@@ -888,6 +911,58 @@ class Requests(commands.Cog):
         await interaction.followup.send(
             "✅ Linked! You're **"
             f"{discord.utils.escape_markdown(user['name'])}** in Seerr now — "
+            "requests and AI answers use your own account.", ephemeral=True)
+
+    @requestui.answers_errors("Confirming a link")
+    async def confirm_link(self, interaction: discord.Interaction,
+                           seerr_id: int, mine: bool) -> None:
+        """The Discord user answers "is this Seerr account yours?"."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        presser = interaction.user
+        claim = self.seerr.pending.get(presser.id)
+        if not mine:
+            logger.warning("%s (%s) says Seerr user %s is not theirs, though "
+                           "that profile holds their Discord ID", presser,
+                           presser.id, seerr_id)
+            view = requestui.Card()
+            view.add_item(ui.Container(
+                ui.TextDisplay(
+                    "Got it — I won't link you to that account. Someone "
+                    "saved your Discord ID on it; an admin can sort that "
+                    "out, or ask to be linked to your own account:"),
+                ui.ActionRow(linkui.LinkAskButton()),
+                accent_colour=linkui.ACCENT))
+            await requestui.followup(interaction, view, ephemeral=True)
+            return
+        if claim is None or claim["id"] != int(seerr_id):
+            try:
+                user = await self.seerr.user_for_discord(presser.id)
+            except SeerrError as exc:
+                await interaction.followup.send(explain(exc), ephemeral=True)
+                return
+            await interaction.followup.send(
+                ("You're already linked to Seerr as **"
+                 f"{discord.utils.escape_markdown(user['name'])}**."
+                 if user is not None else
+                 "That account doesn't hold your Discord ID any more. Press "
+                 "**check again** once it does."), ephemeral=True)
+            return
+        try:
+            self._write_links(
+                lambda links: links.__setitem__(str(presser.id),
+                                                int(seerr_id)),
+                path=self._confirmed_file)
+        except OSError as exc:
+            logger.error("Confirming a link failed: %s", exc)
+            await interaction.followup.send(
+                "I couldn't save that — check that the bot can write to its "
+                "data folder.", ephemeral=True)
+            return
+        logger.info("%s (%s) confirmed Seerr user %s as theirs", presser,
+                    presser.id, seerr_id)
+        await interaction.followup.send(
+            "✅ Linked! You're **"
+            f"{discord.utils.escape_markdown(claim['name'])}** in Seerr now — "
             "requests and AI answers use your own account.", ephemeral=True)
 
     @staticmethod

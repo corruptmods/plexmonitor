@@ -89,18 +89,41 @@ def secret_forms() -> list:
     return sorted(forms, key=len, reverse=True)
 
 
+# The token in a Discord webhook or interaction route
+# (/webhooks/<app id>/<token>/..., /interactions/<id>/<token>/callback).
+_DISCORD_TOKEN_PATH = re.compile(
+    r"(/(?:webhooks|interactions)/\d+/)[^/?#\s'\"]+")
+# Control characters (tab aside) and Unicode line breaks. Titles, names and
+# release names end up in log messages; one of these could fake extra log
+# lines or move the cursor in whoever's terminal shows the log.
+_CONTROL = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _escape_control(text: str) -> str:
+    return _CONTROL.sub(lambda m: m.group().encode("unicode_escape")
+                        .decode("ascii"), text)
+
+
 class RedactingFormatter(logging.Formatter):
-    """Formats as usual, then blanks out secrets, tracebacks included."""
+    """Formats as usual, then blanks out secrets, tracebacks included.
+    Control characters in the message itself are shown escaped, so one
+    record is always one line (tracebacks keep their line breaks)."""
 
     def __init__(self, fmt: str) -> None:
         super().__init__(fmt)
         self.secrets = secret_forms()
 
     def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        safe = _escape_control(message)
+        if safe != message:
+            record = logging.makeLogRecord(record.__dict__)
+            record.msg, record.args = safe, None
         text = super().format(record)
         for secret in self.secrets:
             text = text.replace(secret, "***")
         text = _SECRET_PARAM.sub(r"\1=***", text)
+        text = _DISCORD_TOKEN_PATH.sub(r"\1***", text)
         return _SECRET_FIELD.sub(r"\1***", text)
 
 

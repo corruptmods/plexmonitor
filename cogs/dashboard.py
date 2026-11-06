@@ -61,7 +61,7 @@ logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.1.3"
+BUILD = "v1.1.4"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -88,9 +88,11 @@ def _same_title(ours: Any, theirs: Any) -> bool:
 
 
 def md(text: Any) -> str:
-    """Text from outside (a release name, a category) shown as itself, not
-    as markdown: anyone can name a torrent "[Dune](http://...)"."""
-    return discord.utils.escape_markdown(str(text))
+    """Text from outside (a release name, a category, a player name) shown
+    as itself, not as markdown: anyone can name a torrent "[Dune](http://...)".
+    escape_markdown leaves Discord's <@id>, <#id>, <:emoji:id> and <t:...>
+    syntax alone, so "<" is escaped too."""
+    return discord.utils.escape_markdown(str(text)).replace("<", "\\<")
 
 
 def in_code(text: Any) -> str:
@@ -2161,7 +2163,7 @@ class Dashboard(commands.Cog):
         "M*A*S*H" cannot break the bold around it, and an empty title falls
         back to something visible instead of a bare "****".
         """
-        esc = discord.utils.escape_markdown
+        esc = md
         kind = str(session.get("media_type") or "").lower()
         title = str(session.get("title") or "").strip()
         series = str(session.get("series") or "").strip()
@@ -2361,10 +2363,10 @@ class Dashboard(commands.Cog):
                                        line_prefix=heading)
 
         # Who, and on what.
-        who = [f"**{discord.utils.escape_markdown(str(user))}**"]
+        who = [f"**{md(user)}**"]
         if session.get("player"):
-            who.append(self._truncate(
-                str(session["player"]).split(".")[0].strip(), 30))
+            who.append(md(self._truncate(
+                str(session["player"]).split(".")[0].strip(), 30)))
         pad = self._detail_indent
         sub = self._detail_indent_sub
         lines = [headline, "-# " + sub + " · ".join(who)]
@@ -2492,7 +2494,7 @@ class Dashboard(commands.Cog):
             spent = len(suffix) if self.user_line else len(user) + len(suffix)
             title = self._truncate(title, max(14, budget - spent))
         headline = (f"**{title}**{suffix}" if self.user_line
-                    else f"**{title}**{suffix} — {user}")
+                    else f"**{title}**{suffix} — {md(user)}")
 
         # State and delivery emoji sit on the headline, which is ordinary
         # rich text -- they cannot go inside the code block below.
@@ -2560,12 +2562,15 @@ class Dashboard(commands.Cog):
             player = str(session["player"]).split(".")[0].strip()
             if include_bar:
                 # Legacy text mode: player joins the packed detail, tightly
-                # truncated because text width sets embed width there.
-                detail.append(self._truncate(player, 18))
+                # truncated because text width sets embed width there. In a
+                # code block it only needs its backticks neutralised.
+                short = self._truncate(player, 18)
+                detail.append(in_code(short) if self.field_style == "boxed"
+                              else md(short))
             else:
                 # Image mode: the player gets its own closing line, and can
                 # afford to be longer since width comes from the bar image.
-                player_line = self._truncate(player, 30)
+                player_line = md(self._truncate(player, 30))
 
         eta = ""
         if (
@@ -2596,7 +2601,7 @@ class Dashboard(commands.Cog):
         if self.user_line:
             shown = (textwidth.fit_wrap(user, self._card_budget(), bold=True)
                      if include_bar else user)
-            lines.append(f"{self._user_indent}**{shown}**")
+            lines.append(f"{self._user_indent}**{md(shown)}**")
         # The bar's backticks are markup, not visible width -- measure the
         # rendered text so the split decision matches what a reader sees.
         if eta and include_bar:
@@ -4828,11 +4833,14 @@ class Dashboard(commands.Cog):
         # channel the press came from: in fallback mode that is the old
         # cards channel, and replacing "the dashboard" there posted a whole
         # second dashboard into the cards channel.
-        channel = self.bot.get_channel(self.channel_id) or channel
-        if message is None or (
-            self.dashboard_message_id
-            and message.id != self.dashboard_message_id
-        ):
+        channel = self.bot.get_channel(self.channel_id)
+        if channel is None:
+            logger.info("Flip ignored -- the status channel is unresolvable")
+            return
+        # Only the tracked dashboard is ever edited. A press anywhere else --
+        # including while no dashboard is tracked at all -- is a stale copy:
+        # it must never be rewritten with the live dashboard.
+        if message is None or message.id != self.dashboard_message_id:
             if message is not None:
                 logger.info(
                     "Flip pressed on stale message %s -- redirecting to %s",
