@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.0
+
+Music.
+
+- **Stream cards** show the album under the track, the album's cover rather
+  than the artist's photo, and the audio format ("Direct play · FLAC"). With
+  `artwork: "remote"`, music now has covers too, from the Cover Art Archive.
+- **Requesting music** (with Seerr AI's music on): the request panel finds
+  albums and artists. Album cards have a Request button; artist cards list
+  their albums to pick from.
+- **Now on Plex** posts albums when they land, with the cover, a Listen on Plex
+  button and who asked for it.
+- **The assistant** can search music, show album and artist cards, and knows
+  about music requests, recently added albums and what's playing.
+
+Plain Seerr is unchanged: without Seerr AI's music, none of this shows up.
+
 ## 1.1.4
 
 Fixes from a security review. One thing to know after updating:

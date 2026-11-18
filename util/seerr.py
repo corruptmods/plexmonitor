@@ -174,7 +174,103 @@ APP_URL_TTL = 600.0
 
 def display_title(summary: Dict[str, Any]) -> str:
     year = summary.get("year")
-    return f"{summary['title']} ({year})" if year else str(summary["title"])
+    title = str(summary["title"])
+    if summary.get("media_type") == "album" and summary.get("artist"):
+        title = f"{summary['artist']} – {title}"
+    return f"{title} ({year})" if year else title
+
+
+# ------------------------------------------------------------------ music
+#
+# Seerr AI keys music by MusicBrainz ID: an artist ID and an album's
+# release-group ID (github.com/corruptmods/seerrai, server/routes/music.ts).
+# Plain Seerr has none of this; see SeerrClient.music_ready.
+
+COVER_ART = "https://coverartarchive.org/release-group/{}/front-500"
+_MBID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}"
+                   r"-[0-9a-f]{12}$")
+
+
+def is_mbid(value: Any) -> bool:
+    return bool(_MBID.match(str(value or "").strip().lower()))
+
+
+def pick_id(summary: Dict[str, Any]) -> Any:
+    """A summary's ID: TMDB for films and series, MusicBrainz for music."""
+    return summary.get("id") if summary.get("media_type") in (
+        "album", "artist") else summary.get("tmdb_id")
+
+
+def any_summary(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """summarize or summarize_music, whichever the item is."""
+    if isinstance(item, dict) and item.get("mediaType") in ("album",
+                                                            "artist"):
+        return summarize_music(item)
+    return summarize(item)
+
+
+def summarize_music(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A music search result or details payload (album or artist) in the
+    shape the bot uses. "id" is the MusicBrainz ID; albums also carry their
+    artist's, which a request needs."""
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("mediaType")
+    mbid = str(item.get("id") or "").lower()
+    if kind not in ("album", "artist") or not is_mbid(mbid):
+        return None
+    try:
+        status = int(item.get("status") or STATUS_UNKNOWN)
+    except (TypeError, ValueError):
+        status = STATUS_UNKNOWN
+    if kind == "artist":
+        info = item.get("mediaInfo") or {}
+        if "status" not in item and info.get("status"):
+            try:
+                status = int(info["status"])
+            except (TypeError, ValueError):
+                pass
+        return {
+            "media_type": "artist", "id": mbid,
+            "title": str(item.get("name") or "Unknown artist"),
+            "artist": "", "artist_id": mbid, "year": "",
+            "detail": " · ".join(str(x) for x in (
+                item.get("disambiguation"), item.get("type"),
+                item.get("country")) if x),
+            "overview": str(item.get("biography") or ""),
+            "poster_url": "", "status": status,
+            "status_label": STATUS_LABELS.get(status, ""),
+            "on_plex": status in (STATUS_AVAILABLE, STATUS_PARTIAL),
+            "media_id": info.get("id"),
+        }
+    artist_id = str(item.get("artistId") or "").lower()
+    if not artist_id:
+        credited = item.get("artists") or []
+        if credited and isinstance(credited[0], dict):
+            artist_id = str(credited[0].get("id") or "").lower()
+    cover = str(item.get("coverUrl") or "")
+    kinds = [str(item.get("primaryType") or "")] + [
+        str(x) for x in item.get("secondaryTypes") or []]
+    return {
+        "media_type": "album", "id": mbid,
+        "title": str(item.get("title") or "Unknown album"),
+        "artist": str(item.get("artistName") or ""),
+        "artist_id": artist_id if is_mbid(artist_id) else "",
+        "year": _year(item.get("releaseDate")),
+        "detail": " · ".join(k for k in kinds if k),
+        "overview": "",
+        "poster_url": cover if cover.startswith("https://")
+        else COVER_ART.format(mbid),
+        "status": status,
+        "status_label": STATUS_LABELS.get(status, ""),
+        "on_plex": status in (STATUS_AVAILABLE, STATUS_PARTIAL),
+        "adding": bool(item.get("addingToLibrary")),
+        "media_id": (item.get("mediaInfo") or {}).get("id"),
+        "plex_url": next((plex_web_url(link.get("url"))
+                          for link in item.get("playLinks") or []
+                          if isinstance(link, dict) and link.get("url")
+                          and link.get("server", "plex") == "plex"), ""),
+    }
 
 
 def link_help(discord_id: int) -> str:
@@ -390,6 +486,93 @@ class SeerrClient:
             self._public = self._public or {}
         self._public_at = now
         return self._public
+
+    async def music_ready(self) -> bool:
+        """Whether this Seerr does music at all: Seerr AI with music on and
+        Lidarr set up. Plain Seerr has no such setting, so it's False there.
+        Whether it's on for one person is only known by asking as them."""
+        return bool((await self.public_settings()).get("musicReady"))
+
+    @property
+    def music_known(self) -> bool:
+        """music_ready as last read, without a network call -- for a popup,
+        which has to be the very first answer to a press."""
+        return bool((self._public or {}).get("musicReady"))
+
+    async def music_search(self, query: str, user_id: Optional[int] = None,
+                           timeout: Optional[float] = None
+                           ) -> Dict[str, List[Dict[str, Any]]]:
+        """Albums and artists matching `query` (MusicBrainz, through Seerr
+        AI), as summaries: {"albums": [...], "artists": [...]}. MusicBrainz
+        answering "busy" (503) is retried once."""
+        text = " ".join(str(query or "").split())
+        if len(text) < 2:
+            return {"albums": [], "artists": []}
+        key = "music:" + text.lower() + (f"@{user_id}" if user_id else "")
+        hit = self._search_cache.get(key)
+        now = time.monotonic()
+        if hit and now - hit[0] < SEARCH_TTL:
+            return hit[1]
+        for attempt in (0, 1):
+            try:
+                data = await self._call("GET", "/music/search",
+                                        query={"query": text},
+                                        user_id=user_id, timeout=timeout)
+                break
+            except SeerrError as exc:
+                if exc.status != 503 or attempt:
+                    raise
+                await asyncio.sleep(1.5)
+        found = {
+            "albums": [a for a in (summarize_music(r) for r in
+                                   (data or {}).get("albums") or []) if a],
+            "artists": [a for a in (summarize_music(r) for r in
+                                    (data or {}).get("artists") or []) if a],
+        }
+        if len(self._search_cache) >= SEARCH_CACHE_SIZE:
+            self._search_cache.pop(next(iter(self._search_cache)))
+        self._search_cache[key] = (now, found)
+        return found
+
+    async def music_details(self, kind: str, mbid: str,
+                            user_id: Optional[int] = None) -> Dict[str, Any]:
+        """An album's or artist's full payload, as Seerr AI has it."""
+        if kind not in ("album", "artist") or not is_mbid(mbid):
+            raise SeerrError(400, "That isn't a MusicBrainz ID.")
+        data = await self._call("GET", f"/music/{kind}/{mbid.lower()}",
+                                user_id=user_id)
+        return data if isinstance(data, dict) else {}
+
+    async def album_tracks(self, mbid: str) -> List[Dict[str, Any]]:
+        if not is_mbid(mbid):
+            return []
+        data = await self._call("GET", f"/music/album/{mbid.lower()}/tracks")
+        return [t for t in (data or {}).get("tracks") or []
+                if isinstance(t, dict)]
+
+    async def artist_albums(self, mbid: str) -> List[Dict[str, Any]]:
+        """An artist's albums (first page: up to 100), as summaries."""
+        if not is_mbid(mbid):
+            return []
+        data = await self._call("GET",
+                                f"/music/artist/{mbid.lower()}/albums",
+                                query={"page": 1})
+        return [a for a in (summarize_music(r) for r in
+                            (data or {}).get("results") or []) if a]
+
+    async def create_music_request(self, user_id: int, artist_mbid: str,
+                                   albums: Iterable[str]) -> Dict[str, Any]:
+        chosen = [a.lower() for a in albums if is_mbid(a)]
+        if not is_mbid(artist_mbid) or not chosen:
+            raise SeerrError(400, "Pick an album to request.")
+        data = await self._call("POST", "/request/music", body={
+            "artistMbid": artist_mbid.lower(), "albums": chosen},
+            user_id=user_id)
+        self.forget_search()
+        return data if isinstance(data, dict) else {}
+
+    async def music_link(self, kind: str, mbid: str) -> str:
+        return f"{await self.app_url()}/music/{kind}/{mbid}"
 
     async def partial_requests(self) -> bool:
         return bool((await self.public_settings()).get(
@@ -761,7 +944,8 @@ def ai_answer(data: Any) -> tuple:
     """(text, titles) from a Seerr AI answer.
 
     Titles are Seerr MovieResult/TvResult objects, as its search returns
-    them, which `summarize` reads. Tolerant of the answer's exact field
+    them, which `summarize` reads, then its albums and artists, which
+    `summarize_music` reads. Tolerant of the answer's exact field
     names: a pick-style {reason, result} entry works too, and the reason is
     kept as the title's note.
     """
@@ -788,4 +972,11 @@ def ai_answer(data: Any) -> tuple:
                 titles.append(inner)
         if titles:
             break
+    # Seerr AI answers music apart: {"music": {"albums": [...],
+    # "artists": [...]}} beside its films and series (lib/ai/features.ts).
+    music = data.get("music") if isinstance(data.get("music"), dict) else {}
+    for key in ("albums", "artists"):
+        for row in music.get(key) or []:
+            if isinstance(row, dict) and row.get("id"):
+                titles.append(row)
     return text, titles

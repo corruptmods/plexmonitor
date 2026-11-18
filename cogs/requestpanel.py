@@ -64,7 +64,8 @@ class RequestPanelButton(ui.DynamicItem[ui.Button],
             await interaction.response.send_message(
                 "Requests are switched off right now.", ephemeral=True)
             return
-        await interaction.response.send_modal(RequestModal(requests))
+        await interaction.response.send_modal(
+            RequestModal(requests, music=requests.seerr.music_known))
 
 
 class AskPanelButton(ui.DynamicItem[ui.Button], template=r"plexmon:panel:ask"):
@@ -127,8 +128,13 @@ class RequestModal(ui.Modal, title="Request a movie or show"):
                          placeholder="e.g. Dune: Part Two, or Severance",
                          max_length=200)
 
-    def __init__(self, requests) -> None:
-        super().__init__(timeout=requestui.FORM_TIMEOUT)
+    def __init__(self, requests, music: bool = False) -> None:
+        super().__init__(timeout=requestui.FORM_TIMEOUT,
+                         title="Request a movie, show or album" if music
+                         else "Request a movie or show")
+        if music:
+            self.query.placeholder = ("e.g. Dune: Part Two, Severance, or "
+                                      "an album or artist")
         self.requests = requests
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -174,6 +180,7 @@ class RequestPanel(commands.Cog):
         # Seerr AI fixes most reported problems by itself; plain Seerr
         # leaves them to the admins. The panel says which.
         self._self_fixing = False
+        self._music = False
 
     async def cog_load(self) -> None:
         self.bot.add_dynamic_items(*PANEL_ITEMS)
@@ -203,10 +210,12 @@ class RequestPanel(commands.Cog):
     def panel(self) -> tuple:
         """(embed, view) for the panel as it should look right now."""
         ai = self._ai_on()
+        music = getattr(self, "_music", False)
         lines = [
             "Press **Request** and type a title. You'll see straight away "
             "whether it's already on Plex, and can request it in one tap — "
-            "a whole show, or just the seasons you want.",
+            "a whole show, or just the seasons you want."
+            + (" Albums and artists work too." if music else ""),
         ]
         if ai:
             lines.append(
@@ -226,7 +235,8 @@ class RequestPanel(commands.Cog):
                     if requests is not None else 0)
         if announce:
             lines.append(f"-# New arrivals are announced in <#{announce}>.")
-        embed = discord.Embed(title="🎬 Request a movie or show",
+        embed = discord.Embed(title="🎬 Request a movie, show or album"
+                              if music else "🎬 Request a movie or show",
                               description="\n".join(lines), colour=ACCENT)
         embed.set_footer(text="Your Discord needs linking to Seerr once — "
                               "you'll be shown how the first time.")
@@ -265,6 +275,7 @@ class RequestPanel(commands.Cog):
         requests = self.bot.get_cog("Requests")
         if requests is not None and requests.seerr.enabled:
             self._self_fixing = await requests.seerr.check_ai() is True
+            self._music = await requests.seerr.music_ready()
         embed, view = self.panel()
         wanted = self.fingerprint(embed, view)
 

@@ -148,6 +148,10 @@ class TautulliClient:
             "media_type": media_type,
             "title": _str(s.get("title")),
             "series": _str(s.get("grandparent_title")),
+            # Music: the album a track is from (parent_title is a season's
+            # name for an episode, so it is only kept for tracks).
+            "album": _str(s.get("parent_title")) if media_type == "track"
+            else "",
             "season": _int(s.get("parent_media_index")),
             "episode": _int(s.get("media_index")),
             "year": _str(s.get("year")),
@@ -196,13 +200,19 @@ class TautulliClient:
             "guids": [str(g) for g in (s.get("guids") or []) if g],
             "grandparent_guids": [str(g) for g in
                                   (s.get("grandparent_guids") or []) if g],
+            # A track's album ("mbid://..." when Plex matched it).
+            "parent_guids": [str(g) for g in
+                             (s.get("parent_guids") or []) if g],
             "original_title": _str(s.get("original_title")),
             # Poster path for the card thumbnail: the show's poster for
             # episodes (an episode thumb is a video still, not art), the
-            # movie's own poster otherwise.
+            # album cover for music (the artist photo second), the movie's
+            # own poster otherwise.
             "poster": (
                 _str(s.get("grandparent_thumb")) or _str(s.get("parent_thumb"))
-                if media_type in ("episode", "track") else _str(s.get("thumb"))
+                if media_type == "episode" else
+                _str(s.get("parent_thumb")) or _str(s.get("grandparent_thumb"))
+                if media_type == "track" else _str(s.get("thumb"))
             ) or _str(s.get("thumb")),
         }
 
@@ -246,9 +256,12 @@ class TautulliClient:
             if session.get("hw_encode"):
                 label += " (HW)"
             return f"{label} · {', '.join(reasons)}" if reasons else label
+        # Music has no picture to describe, so its format says the most.
+        codec = (session.get("audio_codec") or "").upper() \
+            if str(session.get("media_type") or "").lower() == "track" else ""
         if decision == "copy":
-            return "Direct stream"
-        return "Direct play"
+            return f"Direct stream · {codec}" if codec else "Direct stream"
+        return f"Direct play · {codec}" if codec else "Direct play"
 
     async def get_image(self, img_path: str, width: int = 240,
                         height: int = 360) -> Optional[bytes]:

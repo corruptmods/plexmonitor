@@ -26,13 +26,13 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import discord
 from discord import app_commands, ui
 from discord.ext import commands, tasks
 
-from util import linkui, requestui
+from util import linkui, musicui, requestui
 from util.auth import admin_users, is_admin, is_member
 from util.jsonfile import data_dir, read_json, write_json
 from util import seerr as seerrapi
@@ -89,11 +89,17 @@ def _norm(text: str) -> str:
 
 
 def matches_title(text: str, result: Dict[str, Any]) -> bool:
-    """`text` names this result: its title, optionally with its year."""
+    """`text` names this result: its title, optionally with its year -- and
+    for an album, optionally with its artist ("Abbey Road by The Beatles")."""
     typed = _norm(text)
     title = _norm(result.get("title") or "")
     year = str(result.get("year") or "")
-    return bool(title) and typed in (title, f"{title} {year}".strip())
+    names = {title, f"{title} {year}".strip()}
+    artist = _norm(result.get("artist") or "")
+    if result.get("media_type") == "album" and artist:
+        names |= {f"{artist} {title}", f"{title} {artist}",
+                  f"{title} by {artist}"}
+    return bool(title) and typed in names
 ISSUE_VALUE = re.compile(r"^issue:(\d+):(movie|tv):(\d+)(?::(.*))?$")
 # What the issue form offers, and how each reaches Seerr. Every choice is one
 # of Seerr's own issue types, so plain Seerr takes them all. Seerr AI also
@@ -159,8 +165,14 @@ def explain(exc: SeerrError) -> str:
         return "Every season is already on Plex or already requested."
     if exc.status in (401, 403):
         return f"Seerr said no: {exc.message}"
+    if exc.status == 404 and "music" in exc.message.lower():
+        return f"Seerr said no: {exc.message}"      # "Music is not set up."
     if exc.status == 404:
         return "Seerr couldn't find that title."
+    if exc.status == 400:
+        return f"Seerr said no: {exc.message}"
+    if exc.status == 503:
+        return "Seerr's music lookup is busy — try again in a moment."
     return f"Seerr had a problem ({exc.status}): {exc.message}"
 
 
@@ -336,7 +348,8 @@ class Requests(commands.Cog):
             return int(DEFAULTS[key])
 
     async def cog_load(self) -> None:
-        for item in requestui.DYNAMIC_ITEMS + linkui.LINK_ITEMS:
+        for item in (requestui.DYNAMIC_ITEMS + linkui.LINK_ITEMS
+                     + musicui.MUSIC_ITEMS):
             self.bot.add_dynamic_items(item)
         if self.seerr.enabled:
             self.announce_loop.change_interval(
@@ -347,7 +360,8 @@ class Requests(commands.Cog):
         self.announce_loop.cancel()
         try:
             self.bot.remove_dynamic_items(*requestui.DYNAMIC_ITEMS,
-                                          *linkui.LINK_ITEMS)
+                                          *linkui.LINK_ITEMS,
+                                          *musicui.MUSIC_ITEMS)
         except Exception:
             logger.debug("remove_dynamic_items failed", exc_info=True)
         await self.seerr.close()
@@ -430,7 +444,8 @@ class Requests(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            results = await self.seerr.search(text)
+            results, music = await asyncio.gather(
+                self.seerr.search(text), self._music_matches(text))
         except SeerrError as exc:
             if assistant is not None and assistant._own_ready():
                 await assistant.private_answer(interaction, text, fresh=True,
@@ -438,12 +453,17 @@ class Requests(commands.Cog):
                 return
             await interaction.followup.send(explain(exc), ephemeral=True)
             return
+        results = results + music
         exact = [r for r in results if matches_title(text, r)]
         if len(exact) == 1 or (len(results) == 1
                                and not looks_like_question(text)):
             pick = exact[0] if exact else results[0]
-            await self.show_card(interaction, pick["media_type"],
-                                 pick["tmdb_id"], deferred=True)
+            if pick["media_type"] in ("album", "artist"):
+                await self.show_music_card(interaction, pick["media_type"],
+                                           pick["id"], deferred=True)
+            else:
+                await self.show_card(interaction, pick["media_type"],
+                                     pick["tmdb_id"], deferred=True)
             return
         # Not a title: a sentence, a typo, or nothing matched. The AI
         # answers, privately; it looks titles up itself and offers cards.
@@ -460,6 +480,115 @@ class Requests(commands.Cog):
             return
         await requestui.followup(interaction, requestui.picker(
             (exact or results)[:25], text))
+
+    async def _music_matches(self, text: str) -> List[Dict[str, Any]]:
+        """Albums and artists for a typed title, when this Seerr does music.
+        Never raises: music failing must not stop a movie being found."""
+        try:
+            if not await self.seerr.music_ready():
+                return []
+            found = await self.seerr.music_search(text, timeout=8)
+        except SeerrError as exc:
+            logger.info("Music search failed: %s", exc)
+            return []
+        return found["albums"][:8] + found["artists"][:4]
+
+    # ------------------------------------------------------------- music
+
+    async def music_card_for(self, kind: str, mbid: str,
+                             note: str = "") -> ui.LayoutView:
+        children, accent = await self.music_card_parts(kind, mbid, note)
+        return musicui.music_card(children, accent)
+
+    async def music_card_parts(self, kind: str, mbid: str, note: str = ""):
+        """An album's or artist's card contents, fresh from Seerr AI.
+        Raises SeerrError."""
+        link = await self.seerr.music_link(kind, mbid)
+        if kind == "album":
+            details = await self.seerr.music_details("album", mbid)
+            try:
+                tracks = await self.seerr.album_tracks(mbid)
+            except SeerrError:
+                tracks = []
+            return musicui.album_items(details, tracks, seerr_link=link,
+                                       note=note)
+        details, albums = await asyncio.gather(
+            self.seerr.music_details("artist", mbid),
+            self.seerr.artist_albums(mbid))
+        return musicui.artist_items(details, albums, seerr_link=link,
+                                    note=note)
+
+    @requestui.answers_errors("Showing music")
+    async def show_music_card(self, interaction: discord.Interaction,
+                              kind: str, mbid: str, deferred: bool = False,
+                              edit: bool = False) -> None:
+        if not deferred:
+            if edit:
+                await interaction.response.defer()
+            else:
+                await interaction.response.defer(ephemeral=True,
+                                                 thinking=True)
+        try:
+            view = await self.music_card_for(kind, mbid)
+        except SeerrError as exc:
+            await interaction.followup.send(explain(exc), ephemeral=True)
+            return
+        if edit:
+            await requestui.edit_original(interaction, view)
+        else:
+            await requestui.followup(interaction, view)
+
+    @requestui.answers_errors("A music request")
+    async def handle_music_request(self, interaction: discord.Interaction,
+                                   artist_mbid: str, album_mbid: str) -> None:
+        """A music Request button. A second press while the first is still
+        being sent is turned away, as for films and series."""
+        key = (interaction.user.id, "album", album_mbid)
+        if key in self._requesting:
+            await interaction.response.send_message(
+                "Already sending that request…", ephemeral=True)
+            return
+        self._requesting.add(key)
+        try:
+            await self._music_request(interaction, artist_mbid, album_mbid)
+        finally:
+            self._requesting.discard(key)
+
+    async def _music_request(self, interaction: discord.Interaction,
+                             artist_mbid: str, album_mbid: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            user = await self.seerr.user_for_discord(interaction.user.id)
+        except SeerrError as exc:
+            await interaction.followup.send(explain(exc), ephemeral=True)
+            return
+        if user is None:
+            await self.send_link_prompt(
+                interaction, note="I can't request as you until your "
+                                  "Discord is linked to Seerr.")
+            return
+        try:
+            request = await self.seerr.create_music_request(
+                user["id"], artist_mbid, [album_mbid])
+        except SeerrError as exc:
+            logger.info("Music request %s by %s refused: %s", album_mbid,
+                        user["name"], exc)
+            await interaction.followup.send(explain(exc), ephemeral=True)
+            return
+        status = request.get("status")
+        logger.info("Requested album %s for %s (Seerr user %s), status %s",
+                    album_mbid, interaction.user, user["id"], status)
+        channel = self._announce_channel()
+        where = (f" I'll post in {channel.mention} when it's ready."
+                 if channel is not None else "")
+        note = ("Requested — it's waiting for approval."
+                if status == seerrapi.REQUEST_PENDING
+                else "Requested — it's on its way." + where)
+        try:
+            view = await self.music_card_for("album", album_mbid, note=note)
+            await requestui.followup(interaction, view)
+        except SeerrError:
+            await interaction.followup.send(f"✅ {note}", ephemeral=True)
 
     async def report(self, interaction: discord.Interaction,
                      title: str) -> None:
@@ -1164,6 +1293,12 @@ class Requests(commands.Cog):
         media is DELETED (a Maintainerr cleanup), which is not news."""
         if request.get("status") != seerrapi.REQUEST_COMPLETED:
             return False
+        if request.get("type") == "music":
+            # Seerr AI tracks music album by album; the artist-level media
+            # status says nothing about THESE albums.
+            return any(a.get("albumStatus") in (seerrapi.STATUS_AVAILABLE,
+                                                seerrapi.STATUS_PARTIAL)
+                       for a in request.get("albums") or [])
         media = request.get("media") or {}
         status = media.get("status4k" if request.get("is4k") else "status")
         return status in (seerrapi.STATUS_AVAILABLE, seerrapi.STATUS_PARTIAL)
@@ -1198,6 +1333,11 @@ class Requests(commands.Cog):
                 media = request.get("media") or {}
                 status = media.get("status4k" if request.get("is4k")
                                    else "status")
+                if request.get("type") == "music":
+                    albums = request.get("albums") or []
+                    status = (seerrapi.STATUS_DELETED if albums and all(
+                        a.get("albumStatus") == seerrapi.STATUS_DELETED
+                        for a in albums) else None)
                 if request.get("status") == seerrapi.REQUEST_COMPLETED \
                         and status == seerrapi.STATUS_DELETED:
                     # Completed by a deletion. Remember it, or a later
@@ -1209,8 +1349,16 @@ class Requests(commands.Cog):
                 self._announced.append(int(rid))   # too old to be news
                 continue
             media = request.get("media") or {}
-            key = (media.get("mediaType") or request.get("type"),
-                   media.get("tmdbId"))
+            if request.get("type") == "music":
+                # One post per album: two people asking for the same album
+                # share it, as they would a film.
+                first = next((a.get("albumMbid") for a in
+                              request.get("albums") or []
+                              if a.get("albumMbid")), None)
+                key = ("music", first or f"request-{rid}")
+            else:
+                key = (media.get("mediaType") or request.get("type"),
+                       media.get("tmdbId"))
             groups.setdefault(key, []).append(request)
         posted = 0
         for (kind, tmdb_id), batch in groups.items():
@@ -1249,17 +1397,11 @@ class Requests(commands.Cog):
             self.seerr.forget_search()
         return posted
 
-    async def _announce(self, channel, kind: str, tmdb_id: Any,
-                        batch: List[Dict[str, Any]]) -> bool:
-        if kind not in ("movie", "tv") or not tmdb_id:
-            return False
-        details = await self.seerr.details(kind, int(tmdb_id))
-        summary = seerrapi.summarize({**details, "mediaType": kind})
-        if summary is None:
-            return False
+    async def _requester_names(self, channel, batch
+                               ) -> Tuple[List[int], List[str]]:
+        """Discord IDs to tell, and names to credit, for these requests."""
         requesters: List[int] = []
         names: List[str] = []
-        seasons: List[int] = []
         for request in batch:
             who = request.get("requestedBy") or {}
             ids = (await self.seerr.discord_for_user(int(who["id"]))
@@ -1269,6 +1411,102 @@ class Requests(commands.Cog):
                 or str(who.get("displayName") or "")
             if name and name not in names:
                 names.append(name)
+        return requesters, names
+
+    async def _announce_music(self, channel, album_mbid: Any,
+                              batch: List[Dict[str, Any]]) -> bool:
+        """"Now on Plex" for an album someone asked for."""
+        if not seerrapi.is_mbid(album_mbid):
+            return False
+        first = batch[0]
+        album = next((a for a in first.get("albums") or []
+                      if a.get("albumMbid") == album_mbid), {})
+        artist = str((first.get("media") or {}).get("foreignTitle") or "")
+        title = str(album.get("title") or "")
+        plex_url = ""
+        try:
+            details = await self.seerr.music_details("album", album_mbid)
+            summary = seerrapi.summarize_music(
+                {**details, "mediaType": "album"}) or {}
+            title = title or summary.get("title", "")
+            artist = artist or summary.get("artist", "")
+            plex_url = summary.get("plex_url", "")
+            year = summary.get("year", "")
+        except SeerrError as exc:
+            if 400 <= exc.status < 500 and exc.status != 404:
+                raise
+            year = ""        # the request alone still makes a good post
+        if not title:
+            return False
+        others = sorted({str(a.get("title")) for r in batch
+                         for a in r.get("albums") or []
+                         if a.get("albumMbid") != album_mbid
+                         and a.get("albumStatus") == seerrapi.STATUS_AVAILABLE
+                         and a.get("title")})
+        requesters, names = await self._requester_names(channel, batch)
+        heading = f"{title} ({year})" if year else title
+        embed = discord.Embed(title=requestui._clip(f"💿 {heading}", 256),
+                              colour=ANNOUNCE_COLOUR)
+        embed.set_author(name=requestui.ANNOUNCE_MARK)
+        lines = []
+        if artist:
+            lines.append(f"**{requestui._esc(artist)}**")
+        if others:
+            lines.append("-# Also here now: " + requestui._esc(
+                requestui._clip(", ".join(others), 300)))
+        if lines:
+            embed.description = "\n".join(lines)
+        embed.set_thumbnail(url=seerrapi.COVER_ART.format(album_mbid))
+        if names:
+            embed.set_footer(text=requestui._clip(
+                "Requested by " + ", ".join(names), 2048))
+        view = ui.View(timeout=None)
+        if plex_url.startswith("http"):
+            view.add_item(ui.Button(label="Listen on Plex", emoji="🎧",
+                                    url=plex_url,
+                                    style=discord.ButtonStyle.link))
+        link = await self.seerr.music_link("album", str(album_mbid))
+        if link.startswith("http"):
+            view.add_item(ui.Button(label="Open in Seerr", url=link,
+                                    style=discord.ButtonStyle.link))
+        await channel.send(embed=embed,
+                           view=view if view.children else discord.utils.MISSING,
+                           allowed_mentions=discord.AllowedMentions.none())
+        logger.info("Announced album %s (%s) to #%s", album_mbid,
+                    ", ".join(str(r.get("id")) for r in batch),
+                    getattr(channel, "name", "?"))
+        if self._watch_party_dms():
+            name = f"{title} by {artist}" if artist else title
+            for user_id in requesters:
+                view = ui.View(timeout=None)
+                if plex_url.startswith("http"):
+                    view.add_item(ui.Button(label="Listen on Plex", emoji="🎧",
+                                            url=plex_url,
+                                            style=discord.ButtonStyle.link))
+                try:
+                    user = self.bot.get_user(user_id) \
+                        or await self.bot.fetch_user(user_id)
+                    await user.send(
+                        f"🎵 **{requestui._esc(name)}** is on Plex now — "
+                        "you asked for it.",
+                        view=view if view.children else discord.utils.MISSING)
+                except discord.HTTPException as exc:
+                    logger.info("Could not DM %s about album %s: %s",
+                                user_id, album_mbid, exc)
+        return True
+
+    async def _announce(self, channel, kind: str, tmdb_id: Any,
+                        batch: List[Dict[str, Any]]) -> bool:
+        if kind == "music":
+            return await self._announce_music(channel, tmdb_id, batch)
+        if kind not in ("movie", "tv") or not tmdb_id:
+            return False
+        details = await self.seerr.details(kind, int(tmdb_id))
+        summary = seerrapi.summarize({**details, "mediaType": kind})
+        if summary is None:
+            return False
+        requesters, names = await self._requester_names(channel, batch)
+        seasons: List[int] = []
         for request in batch:
             seasons.extend(int(s["seasonNumber"])
                            for s in request.get("seasons") or []

@@ -172,6 +172,23 @@ If Seerr also sends its own Discord notifications (Seerr → Settings →
 Notifications → Discord), turn off "Media Available" there, or people get two
 posts.
 
+**Music** works with [Seerr AI](https://github.com/corruptmods/seerrai) when its
+music is on and Lidarr is set up there (plain Seerr has no music, and the bot
+simply leaves it out). Then:
+
+- The request panel finds albums and artists as well as films and series. An
+  album's card shows its cover, tracks and whether it's on Plex, with a
+  **Request** button; an artist's card lists their albums to pick from. Music is
+  requested album by album, as in Seerr AI.
+- "Now on Plex" posts one card per album when it lands, with its cover, a
+  **Listen on Plex** button and who asked for it. With `watch_party_dms` on,
+  requesters get a DM with the same link.
+- The assistant can search music, offer album and artist cards, and tell people
+  about their music requests and recently added albums.
+
+Someone with music switched off in their Seerr AI settings is told so when they
+try to request it.
+
 ### Request panel
 
 The way to request in Discord: a permanent message, like the status dashboard.
@@ -352,6 +369,19 @@ password there and logs where it pointed instead. An older config's `sabnzbd` se
 By default the stream cards sit under the dashboard. To give them their own
 channel, set `stream_cards.channel_id` in `data/config.json`.
 
+`stream_cards.artwork` decides where card art comes from:
+
+- `"attach"` (default): Tautulli's own artwork, uploaded with the message.
+- `"remote"`: public poster links Discord loads itself, so nothing is uploaded.
+  Films and series use Radarr's and Sonarr's posters (then Seerr's); music uses
+  the album's cover from the [Cover Art Archive](https://coverartarchive.org),
+  found by the MusicBrainz ID Plex matched the album to (then Seerr AI's music
+  search). The bot needs to reach coverartarchive.org for that.
+- `"off"`: no artwork.
+
+Music cards show the track as "Artist – Track", the album under it (with an
+`album` icon you can change under `emoji`), and the audio format.
+
 Move the dashboard (`CHANNEL_ID`) or the cards to another channel, or turn the
 separate Completed Downloads message off, and the bot takes the old message
 down on its next start instead of leaving it frozen. (It remembers channels
@@ -412,7 +442,8 @@ Every slot is configurable; set any to `""` to hide it.
   "online": "🟢", "offline": "🔴",
   "uptime": "🖥️", "streams": "📡",
   "now_playing": "🎬", "downloading": "📥", "uptime_stats": "📊",
-  "playing": "▶️", "paused": "⏸️", "transcode": "🔄", "direct": "⚡"
+  "playing": "▶️", "paused": "⏸️", "transcode": "🔄", "direct": "⚡",
+  "album": "💿"
 }
 ```
 

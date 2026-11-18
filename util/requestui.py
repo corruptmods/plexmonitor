@@ -109,6 +109,10 @@ def requesters(details: Dict[str, Any]) -> List[str]:
 
 # ------------------------------------------------------------ interactive
 
+KIND_NAMES = {"movie": "Movie", "tv": "TV show", "album": "Album",
+              "artist": "Artist"}
+KIND_ICONS = {"movie": "🎬", "tv": "📺", "album": "💿", "artist": "🎤"}
+
 class RequestButton(ui.DynamicItem[ui.Button],
                     template=r"plexmon:req:(?P<kind>movie|tv):(?P<tmdb>\d+)"
                              r"(?::(?P<seasons>[\d,]+))?"):
@@ -184,12 +188,11 @@ class PickSelect(ui.DynamicItem[ui.Select],
     def __init__(self, results: Sequence[Dict[str, Any]] = ()) -> None:
         options = [discord.SelectOption(
             label=_clip(seerrapi.display_title(r), 100),
-            description=_clip(("Movie" if r["media_type"] == "movie"
-                               else "TV show")
+            description=_clip(KIND_NAMES.get(r["media_type"], "")
                               + (f" · {r['status_label']}"
                                  if r.get("status_label") else ""), 100),
-            emoji="🎬" if r["media_type"] == "movie" else "📺",
-            value=f"{r['media_type']}:{r['tmdb_id']}")
+            emoji=KIND_ICONS.get(r["media_type"]),
+            value=f"{r['media_type']}:{r.get('tmdb_id') or r.get('id')}")
             for r in list(results)[:25]] or [
             discord.SelectOption(label="—", value="movie:0")]
         super().__init__(ui.Select(custom_id="plexmon:pick:req",
@@ -207,9 +210,11 @@ class PickSelect(ui.DynamicItem[ui.Select],
         if cog is None or not values:
             await interaction.response.defer()
             return
-        kind, _, tmdb = str(values[0]).partition(":")
-        if kind in ("movie", "tv") and tmdb.isdigit():
-            await cog.show_card(interaction, kind, int(tmdb), edit=True)
+        kind, _, ident = str(values[0]).partition(":")
+        if kind in ("movie", "tv") and ident.isdigit():
+            await cog.show_card(interaction, kind, int(ident), edit=True)
+        elif kind in ("album", "artist") and seerrapi.is_mbid(ident):
+            await cog.show_music_card(interaction, kind, ident, edit=True)
 
 
 DYNAMIC_ITEMS = (RequestButton, SeasonSelect, PickSelect)

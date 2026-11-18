@@ -47,6 +47,7 @@ from util.formatting import (
 )
 from util import arr as arrapi
 from util import cardimage
+from util import coverart
 from util import textwidth
 from util.seerr import summarize as seerr_summarize
 from util.kuma import KumaClient
@@ -61,7 +62,7 @@ logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.1.4"
+BUILD = "v1.2.0"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -329,6 +330,7 @@ DEFAULT_EMOJI = {
     "queue_speed": "🚀", "total_space": "🗄️",
     "now_playing": "🎬", "downloading": "📥", "uptime_stats": "📊",
     "episodes": "🎥", "tracks": "🎵", "bandwidth": "📶", "progress": "⏳",
+    "album": "💿",
     "playing": "▶️", "paused": "⏸️", "transcode": "🔄", "direct": "⚡",
     "response": "⏱️",
     "last_downtime": "🔻",
@@ -535,6 +537,8 @@ class Dashboard(commands.Cog):
             if client.enabled:
                 logger.info("%s history enabled as a completed-downloads "
                             "source", client.kind.title())
+        # Album covers for music cards in remote-artwork mode.
+        self._coverart = coverart.CoverArtClient()
 
         self.completed_file = os.path.join(self.data_dir,
                                            "completed_downloads.json")
@@ -1634,6 +1638,7 @@ class Dashboard(commands.Cog):
                 logger.debug("arr close failed", exc_info=True)
         if self.tautulli:
             await self.tautulli.close()
+        await self._coverart.close()
         if self.kuma:
             await self.kuma.close()
         if self.uptimerobot:
@@ -1714,6 +1719,10 @@ class Dashboard(commands.Cog):
             "media_type": getattr(session, "type", ""),
             "title": getattr(session, "title", "Unknown"),
             "series": getattr(session, "grandparentTitle", "") or "",
+            "album": (getattr(session, "parentTitle", "") or ""
+                      if getattr(session, "type", "") == "track" else ""),
+            "audio_codec": str(getattr(media, "audioCodec", "") or "")
+            if media is not None else "",
             "season": getattr(session, "parentIndex", 0) or 0,
             "episode": getattr(session, "index", 0) or 0,
             "year": str(getattr(session, "year", "") or ""),
@@ -2182,6 +2191,21 @@ class Dashboard(commands.Cog):
         name = title or str(session.get("full_title") or "").strip()
         return esc(name or "Unknown"), suffix
 
+    def _album_label(self, session, boxed: bool = False,
+                     year: bool = True) -> str:
+        """"💿 Album (Year)" for a track, else "". boxed: the text goes in a
+        code block, where only backticks need neutralising."""
+        if str(session.get("media_type") or "").lower() != "track":
+            return ""
+        album = str(session.get("album") or "").strip()
+        if not album:
+            return ""
+        when = str(session.get("year") or "").strip() if year else ""
+        text = self._truncate(album, 40) + (f" ({when})" if when else "")
+        text = in_code(text) if boxed else md(text)
+        icon = "" if boxed else self._emoji("album")
+        return f"{icon} {text}" if icon else text
+
     @property
     def _card_heading(self) -> str:
         """The marker every card title starts with, or "" in wrap mode.
@@ -2369,7 +2393,11 @@ class Dashboard(commands.Cog):
                 str(session["player"]).split(".")[0].strip(), 30)))
         pad = self._detail_indent
         sub = self._detail_indent_sub
-        lines = [headline, "-# " + sub + " · ".join(who)]
+        lines = [headline]
+        album = self._album_label(session)
+        if album:
+            lines.append("-# " + sub + album)
+        lines.append("-# " + sub + " · ".join(who))
 
         renderer = (self.bar_transcode
                     if session.get("decision") == "transcode" else self.bar)
@@ -2530,6 +2558,13 @@ class Dashboard(commands.Cog):
             )
 
         detail: List[str] = []
+        # Without the year: these layouts pack detail into a narrow column,
+        # where "Album (2024)" gets cut to "Album (2…".
+        album = self._album_label(session,
+                                  boxed=self.field_style == "boxed",
+                                  year=False)
+        if album:
+            detail.append(album)
         playback = TautulliClient.describe_playback(session)
         # Split on the separator so a long reason like
         # "Transcode (HW) · subtitles, 4K→1080p" can break across lines
@@ -3476,6 +3511,8 @@ class Dashboard(commands.Cog):
         back to an attachment would put files back on the message, which is
         the exact cost this mode exists to remove.
         """
+        if str(session.get("media_type") or "").lower() == "track":
+            return await self._music_poster(session)
         is_series = bool(session.get("series"))
         name = session.get("series") or session.get("title") or ""
         keys = self._poster_keys(session)
@@ -3499,6 +3536,57 @@ class Dashboard(commands.Cog):
             logger.info("No remote poster for %r (tried %s, and Seerr)",
                         name, ", ".join(keys[:6]))
         return None
+
+    async def _music_poster(self, session) -> Optional[str]:
+        """An album's public cover: the Cover Art Archive by the MusicBrainz
+        ID Plex matched the album to, else Seerr AI's music search for the
+        album by name (its covers come from the same archive)."""
+        album = str(session.get("album") or "").strip()
+        artist = str(session.get("series") or "").strip()
+        url = await self._coverart.front(
+            coverart.mbids(session.get("parent_guids") or []))
+        if url is None and album:
+            url = await self._seerr_album_cover(artist, album)
+        if url is None:
+            name = f"{artist} – {album}" if album else artist
+            misses = self.__dict__.setdefault("_poster_misses", set())
+            if name and name not in misses:
+                misses.add(name)
+                logger.info("No cover found for %r (no MusicBrainz match "
+                            "in Plex, nothing in Seerr)", name)
+        return url
+
+    async def _seerr_album_cover(self, artist: str,
+                                 album: str) -> Optional[str]:
+        requests = self.bot.get_cog("Requests")
+        seerr = getattr(requests, "seerr", None)
+        if seerr is None or not getattr(seerr, "enabled", False):
+            return None
+        cache = self.__dict__.setdefault("_seerr_covers", {})
+        known = cache.get((artist, album))
+        if known and time.monotonic() - known[1] < self.SEERR_POSTER_TTL:
+            return known[0]
+        url = None
+        try:
+            if not await seerr.music_ready():
+                return None
+            found = await seerr.music_search(f"{artist} {album}".strip())
+        except Exception as exc:          # off, busy, plain Seerr
+            logger.debug("Seerr music search for a cover failed: %s", exc)
+            found = None
+        norm = arrapi.ArrClient._norm
+        for item in (found or {}).get("albums", []):
+            # "Album (Deluxe Edition)" in Plex is "Album" in MusicBrainz, and
+            # MusicBrainz credits read "Artist feat. Someone".
+            title = str(item.get("title") or "")
+            base = album.split(" (", 1)[0].split(" [", 1)[0]
+            if (_same_title(album, title) or _same_title(base, title)) and (
+                    not artist or norm(artist)
+                    in norm(str(item.get("artist") or ""))):
+                url = item.get("poster_url") or None
+                break
+        cache[(artist, album)] = (url, time.monotonic())
+        return url
 
     async def _arr_poster(self, keys: List[str], is_series: bool,
                           fresh: bool = False) -> Optional[str]:

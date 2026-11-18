@@ -52,6 +52,7 @@ import discord
 from discord import app_commands, ui
 from discord.ext import commands
 
+from util import musicui
 from util import aipager, linkui, requestui
 from util.auth import home_guild, is_member
 from util.jsonfile import data_dir, read_json, write_json
@@ -85,6 +86,9 @@ requested or downloading -- look it up.
 - To offer a title for requesting, call show_request_cards with the exact \
 media_type and tmdb_id from search results. You cannot file requests \
 yourself; the person presses the Request button on the card.
+- Music, when search_music is available: albums and artists come from \
+search_music, and their cards take the mbid it returns. Music is requested \
+album by album; an artist's card lets the person pick albums.
 - When they mention something they watched ("the last show I watched", \
 "more like what I've been watching"), call my_watch_history instead of \
 asking them.
@@ -147,9 +151,9 @@ def compact_page(pick: Dict[str, Any]) -> Tuple[List[ui.Item], int]:
     """A title card from what the answer already knows, for when Seerr
     can't be asked for the full one."""
     kind = pick["media_type"]
-    lines = [f"### {'🎬' if kind == 'movie' else '📺'} "
+    lines = [f"### {requestui.KIND_ICONS.get(kind, '')} "
              f"{discord.utils.escape_markdown(seerrapi.display_title(pick))}",
-             "-# " + ("Movie" if kind == "movie" else "TV show")
+             "-# " + (pick.get("detail") or requestui.KIND_NAMES.get(kind, ""))
              + (f" · {pick['status_label']}" if pick.get("status_label")
                 else "")]
     if pick.get("overview"):
@@ -159,14 +163,21 @@ def compact_page(pick: Dict[str, Any]) -> Tuple[List[ui.Item], int]:
     items: List[ui.Item] = [ui.Section(text, accessory=ui.Thumbnail(
         pick["poster_url"])) if pick.get("poster_url") else text]
     buttons: List[ui.Item] = []
+    music = kind in ("album", "artist")
     if pick.get("plex_url"):
-        buttons.append(ui.Button(label="Watch on Plex", emoji="▶️",
+        buttons.append(ui.Button(label="Listen on Plex" if music
+                                 else "Watch on Plex",
+                                 emoji="🎧" if music else "▶️",
                                  style=discord.ButtonStyle.link,
                                  url=pick["plex_url"]))
     elif pick.get("status") not in (
             seerrapi.STATUS_PENDING, seerrapi.STATUS_PROCESSING,
             seerrapi.STATUS_AVAILABLE, seerrapi.STATUS_BLOCKLISTED):
-        buttons.append(requestui.RequestButton(kind, pick["tmdb_id"]))
+        if kind == "album" and pick.get("artist_id"):
+            buttons.append(musicui.MusicRequestButton(pick["artist_id"],
+                                                      pick["id"]))
+        elif not music:
+            buttons.append(requestui.RequestButton(kind, pick["tmdb_id"]))
     if buttons:
         items.append(ui.ActionRow(*buttons))
     return items, requestui.ACCENT["available" if pick.get("on_plex")
@@ -482,6 +493,22 @@ class Assistant(commands.Cog):
                 added = []
                 for item in (items or [])[:4]:
                     kind = str(item.get("media_type") or "")
+                    if kind in ("album", "artist"):
+                        mbid = str(item.get("mbid") or "").lower()
+                        summary = seen.get(f"{kind}:{mbid}")
+                        if summary is None and seerrapi.is_mbid(mbid):
+                            try:
+                                summary = seerrapi.summarize_music({
+                                    **await seerr.music_details(kind, mbid),
+                                    "mediaType": kind})
+                            except SeerrError:
+                                summary = None
+                        if summary and all(
+                                (p["media_type"], seerrapi.pick_id(p))
+                                != (kind, mbid) for p in picks):
+                            picks.append(summary)
+                            added.append(seerrapi.display_title(summary))
+                        continue
                     try:
                         tmdb_id = int(item.get("tmdb_id"))
                     except (TypeError, ValueError):
@@ -496,8 +523,8 @@ class Assistant(commands.Cog):
                         except SeerrError:
                             summary = None
                     if summary and all(
-                            (p["media_type"], p["tmdb_id"]) != (kind, tmdb_id)
-                            for p in picks):
+                            (p["media_type"], seerrapi.pick_id(p))
+                            != (kind, tmdb_id) for p in picks):
                         picks.append(summary)
                         added.append(seerrapi.display_title(summary))
                 return {"cards_shown": added} if added else \
@@ -514,6 +541,21 @@ class Assistant(commands.Cog):
                 out = []
                 for row in rows:
                     media = row.get("media") or {}
+                    if row.get("type") == "music":
+                        out.append({
+                            "media_type": "music",
+                            "artist": media.get("foreignTitle"),
+                            "albums": [{
+                                "title": a.get("title"),
+                                "status": seerrapi.STATUS_LABELS.get(
+                                    a.get("albumStatus"), "not available")}
+                                for a in row.get("albums") or []],
+                            "songs": [s.get("title") for s in
+                                      row.get("songs") or []] or None,
+                            "request_status": REQUEST_STATUS.get(
+                                row.get("status"), "?"),
+                            "requested_at": row.get("createdAt")})
+                        continue
                     out.append({
                         "tmdb_id": media.get("tmdbId"),
                         "media_type": media.get("mediaType"),
@@ -543,22 +585,52 @@ class Assistant(commands.Cog):
                          "required": ["media_type", "tmdb_id"]},
                         media_status),
                 ai.Tool("show_request_cards",
-                        "Attach up to 4 title cards under your reply. Each "
-                        "shows availability; requestable ones get a Request "
-                        "button the person can press.",
+                        "Attach up to 4 cards under your reply. Each shows "
+                        "availability; requestable ones get a Request button "
+                        "the person can press. Films and series take their "
+                        "tmdb_id; albums and artists their mbid from "
+                        "search_music (an artist card lists their albums).",
                         {"type": "object", "properties": {"items": {
                             "type": "array", "maxItems": 4, "items": {
                                 "type": "object", "properties": {
                                     "media_type": {"type": "string",
-                                                   "enum": ["movie", "tv"]},
-                                    "tmdb_id": {"type": "integer"}},
-                                "required": ["media_type", "tmdb_id"]}}},
+                                                   "enum": ["movie", "tv",
+                                                            "album",
+                                                            "artist"]},
+                                    "tmdb_id": {"type": "integer"},
+                                    "mbid": {"type": "string"}},
+                                "required": ["media_type"]}}},
                          "required": ["items"]}, show_request_cards),
                 ai.Tool("my_requests",
                         "The asking person's own recent Seerr requests and "
                         "their status.",
                         {"type": "object", "properties": {}}, my_requests),
             ]
+
+            if seerr.music_known:
+                async def search_music(query: str):
+                    found = await seerr.music_search(query)
+                    out = []
+                    for r in found["albums"][:8] + found["artists"][:4]:
+                        seen[f"{r['media_type']}:{r['id']}"] = r
+                        out.append({k: v for k, v in {
+                            "media_type": r["media_type"], "mbid": r["id"],
+                            "title": r["title"],
+                            "artist": r.get("artist") or None,
+                            "year": r.get("year") or None,
+                            "kind": r.get("detail") or None,
+                            "status": r["status_label"] or "not requested",
+                        }.items() if v is not None})
+                    return out or "No albums or artists matched."
+
+                tools.append(ai.Tool(
+                    "search_music",
+                    "Search albums and artists (MusicBrainz, through Seerr). "
+                    "Returns mbids and whether each is on Plex, requested or "
+                    "neither. Music is requested album by album.",
+                    {"type": "object", "properties": {
+                        "query": {"type": "string"}},
+                     "required": ["query"]}, search_music))
 
         dashboard = self._dashboard()
         if dashboard is not None:
@@ -569,6 +641,17 @@ class Assistant(commands.Cog):
                 mapping = getattr(dashboard, "user_mapping", {}) or {}
                 out = []
                 for s in activity.get("sessions") or []:
+                    if str(s.get("media_type") or "").lower() == "track":
+                        out.append({
+                            "track": s.get("title"),
+                            "artist": s.get("series") or None,
+                            "album": s.get("album") or None,
+                            "user": mapping.get(s.get("user", ""),
+                                                s.get("user")),
+                            "progress_percent": s.get("progress"),
+                            "paused": bool(s.get("paused")),
+                            "transcoding": s.get("decision") == "transcode"})
+                        continue
                     out.append({
                         "title": s.get("series") or s.get("title"),
                         "episode": s.get("title") if s.get("series") else None,
@@ -591,12 +674,43 @@ class Assistant(commands.Cog):
                     items.extend(result)
                 items.sort(key=lambda d: float(d.get("completed") or 0),
                            reverse=True)
-                return [{"title": d.get("name"),
-                         "hours_ago": round((time.time()
-                                             - float(d.get("completed")
-                                                     or 0)) / 3600, 1)}
-                        for d in items[:12]] or \
-                    "No recent imports reported by Radarr/Sonarr."
+                out = [{"title": d.get("name"),
+                        "hours_ago": round((time.time()
+                                            - float(d.get("completed")
+                                                    or 0)) / 3600, 1)}
+                       for d in items[:12]]
+                out += await recent_music()
+                return out or "Nothing new reported by Radarr, Sonarr or " \
+                    "Plex's music libraries."
+
+            async def recent_music():
+                """Albums Plex added lately (Tautulli; music libraries)."""
+                tautulli = getattr(dashboard, "tautulli", None)
+                if tautulli is None:
+                    return []
+                try:
+                    data = await tautulli.call("get_recently_added", count=8,
+                                               media_type="artist")
+                except Exception as exc:
+                    logger.info("Recently added music unavailable: %s", exc)
+                    return []
+                rows = (data or {}).get("recently_added") \
+                    if isinstance(data, dict) else None
+                out = []
+                for row in rows or []:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        added = float(row.get("added_at") or 0)
+                    except (TypeError, ValueError):
+                        added = 0.0
+                    out.append({k: v for k, v in {
+                        "album": row.get("title"),
+                        "artist": row.get("parent_title") or None,
+                        "year": row.get("year") or None,
+                        "hours_ago": round((time.time() - added) / 3600, 1)
+                        if added else None}.items() if v is not None})
+                return out
 
             async def library_stats():
                 libraries = await dashboard._fetch_libraries()
@@ -609,7 +723,8 @@ class Assistant(commands.Cog):
                 ai.Tool("now_playing", "What is streaming on Plex right now.",
                         {"type": "object", "properties": {}}, now_playing),
                 ai.Tool("recently_added",
-                        "Titles imported to Plex recently (Radarr/Sonarr).",
+                        "What arrived on Plex recently: films and series "
+                        "(Radarr/Sonarr) and albums (Plex music libraries).",
                         {"type": "object", "properties": {}},
                         recently_added),
                 ai.Tool("library_stats", "How many items each Plex library "
@@ -703,6 +818,9 @@ class Assistant(commands.Cog):
                 reply += "\n(Cards shown: " + ", ".join(turn["offered"]) + ")"
             convo.add_assistant_text(reply or "…")
         convo.add_user(question)
+        seerr = self._seerr()
+        if seerr is not None:
+            await seerr.music_ready()       # cached; decides the music tool
         text = await ai.run(self.provider, convo, self._tools(asker, picks))
         return text or "I don't have an answer for that.", picks
 
@@ -714,10 +832,10 @@ class Assistant(commands.Cog):
         text, titles = seerrapi.ai_answer(data)
         picks: List[Dict[str, Any]] = []
         for title in titles:
-            summary = seerrapi.summarize(title)
+            summary = seerrapi.any_summary(title)
             if summary is None or any(
-                    (p["media_type"], p["tmdb_id"]) ==
-                    (summary["media_type"], summary["tmdb_id"])
+                    (p["media_type"], seerrapi.pick_id(p)) ==
+                    (summary["media_type"], seerrapi.pick_id(summary))
                     for p in picks):
                 continue
             if title.get("_reason"):
@@ -856,12 +974,14 @@ class Assistant(commands.Cog):
         return build_answer(asked, answer.text, also, answer.footer, page,
                             keys, 0, bottom)
 
-    async def _page(self, kind: str, tmdb_id: int,
+    async def _page(self, kind: str, tmdb_id: Any,
                     fallback: Optional[Dict[str, Any]] = None):
         """One suggestion's title card, as the request panel shows it."""
         requests = self.bot.get_cog("Requests")
         if requests is not None and requests.seerr.enabled:
             try:
+                if kind in ("album", "artist"):
+                    return await requests.music_card_parts(kind, tmdb_id)
                 return await requests.card_parts(kind, tmdb_id)
             except SeerrError as exc:
                 logger.info("Title card for %s:%s unavailable: %s", kind,
@@ -928,7 +1048,7 @@ class Assistant(commands.Cog):
         if result.picks and result.page is None:
             first = result.picks[0]
             result.page = await self._page(first["media_type"],
-                                           first["tmdb_id"], first)
+                                           seerrapi.pick_id(first), first)
         if result.record:
             self._record(user.id, question, result.text,
                          [seerrapi.display_title(p) for p in result.picks])

@@ -2,7 +2,8 @@
 time, with ◀ n / N ▶ under it.
 
 Stateless, so it keeps working across restarts: the ◀/▶ buttons carry the
-whole list in their custom_id ("m693134.t95396..." -- m = movie, t = TV)
+whole list in their custom_id ("m693134.t95396..." -- m = movie, t = TV;
+a = album and r = artist, whose MusicBrainz IDs are packed into 22 characters)
 and the page to show. The answer text is read back from the message itself
 (its text blocks carry fixed component ids), and the title card is fetched
 fresh from Seerr on each flip, so its status and buttons are current.
@@ -10,8 +11,10 @@ fresh from Seerr on each flip, so its status and buttons are current.
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
+import uuid
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import discord
@@ -30,9 +33,16 @@ FOOTER_ID = 9003
 ALSO_ID = 9004
 
 
+_MUSIC_KEYS = {"album": "a", "artist": "r"}
+
+
 def key_of(pick: Dict[str, Any]) -> str:
-    return ("m" if pick["media_type"] == "movie" else "t") + \
-        str(int(pick["tmdb_id"]))
+    kind = pick["media_type"]
+    if kind in _MUSIC_KEYS:
+        raw = uuid.UUID(str(pick["id"])).bytes
+        return _MUSIC_KEYS[kind] + base64.urlsafe_b64encode(raw).decode() \
+            .rstrip("=")
+    return ("m" if kind == "movie" else "t") + str(int(pick["tmdb_id"]))
 
 
 def encode(picks: Sequence[Dict[str, Any]]) -> List[str]:
@@ -46,13 +56,19 @@ def encode(picks: Sequence[Dict[str, Any]]) -> List[str]:
     return keys
 
 
-def decode(key: str) -> Tuple[str, int]:
+def decode(key: str) -> Tuple[str, Any]:
+    """(kind, id): a TMDB number for films and series, a MusicBrainz ID
+    string for albums and artists."""
+    if key[0] in ("a", "r"):
+        raw = base64.urlsafe_b64decode(key[1:] + "==")
+        return ("album" if key[0] == "a" else "artist"), \
+            str(uuid.UUID(bytes=raw))
     return ("movie" if key[0] == "m" else "tv"), int(key[1:])
 
 
 class PageButton(ui.DynamicItem[ui.Button],
                  template=r"plexmon:ai:pg:(?P<dir>[pn]):(?P<page>\d+)"
-                          r":(?P<keys>[mt\d.]+)"):
+                          r":(?P<keys>[mtar][\w.-]*)"):
     """◀ or ▶. `page` is where it goes."""
 
     def __init__(self, direction: str, page: int, keys: Sequence[str]
@@ -67,7 +83,7 @@ class PageButton(ui.DynamicItem[ui.Button],
     @classmethod
     async def from_custom_id(cls, interaction, item, match):
         keys = [k for k in match["keys"].split(".")
-                if re.fullmatch(r"[mt]\d+", k)]
+                if re.fullmatch(r"[mt]\d+|[ar][A-Za-z0-9_-]{22}", k)]
         return cls(match["dir"], int(match["page"]), keys)
 
     async def callback(self, interaction: discord.Interaction) -> None:
