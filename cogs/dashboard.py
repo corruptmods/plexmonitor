@@ -62,7 +62,7 @@ logger = logging.getLogger("plexmonitor.dashboard")
 
 # Bumped on every code change. Shown in the embed footer and logged at
 # startup, so "is my new code actually running?" is answered by looking.
-BUILD = "v1.2.0"
+BUILD = "v1.2.1"
 # Longest the bot's status goes without being re-sent (see _sync_presence).
 PRESENCE_REFRESH = 15 * 60.0
 # Shortest gap between two status changes.
@@ -177,6 +177,13 @@ CARD_WIDTH_MARGIN = 26.0
 EMBED_CONTENT_PX = 484.0
 THUMBNAIL_PX = 96.0
 NBSP_PX = 4.45          # U+00A0 at 16px, from the width table
+# Discord fits a thumbnail inside an 80px box: a 2:3 poster comes out 53px
+# wide, a square album cover the full 80. A card with square art is that
+# much wider, so its bar is drawn that much shorter to keep every card the
+# same width. One "▰"/"▱" segment measured 14px on the client.
+THUMB_BOX_PX = 80.0
+SQUARE_ART_EXTRA_PX = THUMB_BOX_PX - THUMB_BOX_PX * 2 / 3
+GLYPH_SEGMENT_PX = 14.0
 # The state and delivery emoji that prefix a headline.
 HEADLINE_BADGE_PX = 44.0
 # How long a signed CDN url may be reused in an embed before it is
@@ -3695,6 +3702,79 @@ class Dashboard(commands.Cog):
                         keys.append(key)
         return keys
 
+    def _square_art_trim(self, session) -> int:
+        """Bar segments to drop for a card whose art is square (music):
+        enough to give back the width a square thumbnail takes beyond a
+        poster's."""
+        if str(session.get("media_type") or "").lower() != "track":
+            return 0
+        renderer = self.bar
+        if renderer.is_emoji:
+            caps = bool(renderer.cap_left) + bool(renderer.cap_right)
+            pitch = (textwidth.bar_px(renderer.segments, emoji=True,
+                                      caps=caps)
+                     - textwidth.bar_px(renderer.segments - 1, emoji=True,
+                                        caps=caps))
+        else:
+            pitch = GLYPH_SEGMENT_PX
+        if pitch <= 0:
+            return 0
+        return max(0, min(renderer.segments - 4,
+                          round(SQUARE_ART_EXTRA_PX / pitch)))
+
+    def _card_lines(self, session, index: int, posters) -> List[str]:
+        """One stream card's description lines, in the configured layout."""
+        if self._bar_images:
+            # Image mode: a fixed-width rendered bar anchors the card at
+            # an exact pixel width on every client, so titles need no
+            # truncation -- a genuinely huge title wraps, never cut.
+            lines = self._stream_line(
+                session, headline_budget=300, include_bar=False
+            ).split("\n")
+            lines[0] = f"{self._card_heading}{lines[0]}"
+        elif self._layout == "clean":
+            # The heading marker rides inside _clean_lines now, applied
+            # per wrapped line -- prefixing lines[0] here styled only
+            # the first line of a wrapped title.
+            lines = self._clean_lines(session,
+                                      heading=self._card_heading)
+        elif self._classic_layout:
+            # The image-bar layout, with the bar drawn from text or
+            # emoji instead of uploaded. include_bar=False gives the
+            # exact line ordering the rendered-bar era used; the bar is
+            # then appended with no branch, so it starts flush left the
+            # way a full-width image did.
+            lines = self._stream_line(
+                session, headline_budget=300, include_bar=False).split("\n")
+            lines[0] = f"{self._card_heading}{lines[0]}"
+            renderer = (self.bar_transcode
+                        if session.get("decision") == "transcode"
+                        else self.bar)
+            bar_line = renderer.render(
+                session.get("progress", 0), show_percent=False)
+            if self._center_bar and (self._card_anchor or self._bar_images):
+                caps = bool(renderer.cap_left) + bool(renderer.cap_right)
+                width = textwidth.bar_px(renderer.segments,
+                                         emoji=renderer.is_emoji, caps=caps)
+                # NOT `poster` -- that is assigned further down the
+                # loop, so reading it here would size this card against
+                # the PREVIOUS card's artwork.
+                art = posters[index] if index < len(posters) else None
+                has_art = (self._artwork == "remote"
+                           or (bool(art)
+                               and not isinstance(art, Exception)))
+                column = EMBED_CONTENT_PX - (THUMBNAIL_PX if has_art else 0.0)
+                pad = int(max(0.0, (column - width) / 2) / NBSP_PX)
+                if pad:
+                    bar_line = "\u00a0" * pad + bar_line
+            lines.extend([""] * self._bar_gap)
+            lines.append(bar_line)
+        else:
+            # Tree mode: the bar is the closing branch of the card.
+            lines = self._stream_line(session).split("\n")
+            lines[0] = f"{self._card_heading}{lines[0]}"
+        return lines
+
     async def _build_stream_cards(self):
         """Build card embeds plus the message's desired attachment set.
 
@@ -3734,55 +3814,25 @@ class Dashboard(commands.Cog):
                 else STATUS_COLOURS["online"]
             )
 
-            if self._bar_images:
-                # Image mode: a fixed-width rendered bar anchors the card at
-                # an exact pixel width on every client, so titles need no
-                # truncation -- a genuinely huge title wraps, never cut.
-                lines = self._stream_line(
-                    session, headline_budget=300, include_bar=False
-                ).split("\n")
-                lines[0] = f"{self._card_heading}{lines[0]}"
-            elif self._layout == "clean":
-                # The heading marker rides inside _clean_lines now, applied
-                # per wrapped line -- prefixing lines[0] here styled only
-                # the first line of a wrapped title.
-                lines = self._clean_lines(session,
-                                          heading=self._card_heading)
-            elif self._classic_layout:
-                # The image-bar layout, with the bar drawn from text or
-                # emoji instead of uploaded. include_bar=False gives the
-                # exact line ordering the rendered-bar era used; the bar is
-                # then appended with no branch, so it starts flush left the
-                # way a full-width image did.
-                lines = self._stream_line(
-                    session, headline_budget=300, include_bar=False).split("\n")
-                lines[0] = f"{self._card_heading}{lines[0]}"
-                renderer = (self.bar_transcode
-                            if session.get("decision") == "transcode"
-                            else self.bar)
-                bar_line = renderer.render(
-                    session.get("progress", 0), show_percent=False)
-                if self._center_bar and (self._card_anchor or self._bar_images):
-                    caps = bool(renderer.cap_left) + bool(renderer.cap_right)
-                    width = textwidth.bar_px(renderer.segments,
-                                             emoji=renderer.is_emoji, caps=caps)
-                    # NOT `poster` -- that is assigned further down the
-                    # loop, so reading it here would size this card against
-                    # the PREVIOUS card's artwork.
-                    art = posters[index] if index < len(posters) else None
-                    has_art = (self._artwork == "remote"
-                               or (bool(art)
-                                   and not isinstance(art, Exception)))
-                    column = EMBED_CONTENT_PX - (THUMBNAIL_PX if has_art else 0.0)
-                    pad = int(max(0.0, (column - width) / 2) / NBSP_PX)
-                    if pad:
-                        bar_line = "\u00a0" * pad + bar_line
-                lines.extend([""] * self._bar_gap)
-                lines.append(bar_line)
-            else:
-                # Tree mode: the bar is the closing branch of the card.
-                lines = self._stream_line(session).split("\n")
-                lines[0] = f"{self._card_heading}{lines[0]}"
+            # Art first: square art (album covers) makes a wider card, so
+            # its bar is drawn shorter to keep every card the same width.
+            remote_url = (await self._remote_poster(session)
+                          if self._artwork == "remote" else None)
+            art = (posters[index] if self._artwork == "attach"
+                   and index < len(posters) else None)
+            has_art = bool(remote_url) or (
+                bool(art) and not isinstance(art, Exception))
+            trim = self._square_art_trim(session) if has_art else 0
+            renderers = list({id(self.bar): self.bar,
+                              id(self.bar_transcode): self.bar_transcode}
+                             .values())
+            for renderer in renderers:
+                renderer.segments -= trim
+            try:
+                lines = self._card_lines(session, index, posters)
+            finally:
+                for renderer in renderers:
+                    renderer.segments += trim
 
             card = discord.Embed(description="\n".join(lines), colour=colour)
 
@@ -3790,9 +3840,8 @@ class Dashboard(commands.Cog):
                 poster = None
             elif self._artwork == "remote":
                 poster = None
-                url = await self._remote_poster(session)
-                if url:
-                    card.set_thumbnail(url=url)
+                if remote_url:
+                    card.set_thumbnail(url=remote_url)
             else:
                 poster = posters[index] if index < len(posters) else None
             if isinstance(poster, Exception):

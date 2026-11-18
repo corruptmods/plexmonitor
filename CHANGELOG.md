@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1
+
+- Music stream cards are the same width as film and series cards. Album
+  covers are square, which Discord shows wider than a poster, so music cards
+  now draw their progress bar that much shorter.
+
 ## 1.2.0
 
 Music.
